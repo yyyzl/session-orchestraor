@@ -89,6 +89,45 @@
    - 按时间显示 `command_text` 与 `model_output_text`
    - 显示窗口切换事件（新开窗口/复用窗口）
 
+## 强流程管控补充（从 brainstorm 收敛到执行）
+
+### 1) 单窗口固定步骤链（不可缺失）
+
+每个 `dev` 窗口必须按顺序完成以下步骤：
+
+1. `$start`
+2. `$before-frontend-dev` 或 `$before-backend-dev`（按任务类型命中其一或同时命中）
+3. 需求实现（本轮业务指令）
+4. `$check-frontend` 或 `$check-backend`
+5. `$finish-work`
+6. `git提交`
+7. `$record-session`
+
+### 2) 步骤状态与质量门
+
+1. 步骤状态统一使用：`pending/running/passed/failed/retrying/skipped/interrupted`。
+2. 任一步骤未通过，当前窗口不得标记完成。
+3. 单步骤默认最大重试次数：`1`（超限后进入策略判定）。
+4. 每步骤执行后必须写结构化回执（至少包含 `step_id`、`status`、`duration_ms`、`next_step`）。
+
+### 3) 切窗与 handoff 强约束
+
+1. `dev` 任务只有在固定步骤链完整通过后，才允许输出 `start_new_window`。
+2. 切窗前必须进行 `Context Handoff` 校验，缺少关键字段禁止切窗：
+   - `task_goal`
+   - `last_commit_id`
+   - `last_commit_message`
+3. 新窗口首条指令必须包含：
+   - 任务目标
+   - 上一轮提交信息
+   - 下一步动作
+
+### 4) git 提交策略（按任务类型）
+
+1. `planning`：无代码变更时，允许且要求空提交（`git commit --allow-empty`），并记录原因与提交哈希。
+2. `dev`：无代码变更时，禁止空提交；`git提交` 步骤判定失败并进入修正/重试。
+3. 提交粒度固定为每窗口一次（窗口成功后提交）。
+
 ## 验证任务与验收
 
 1. 编排器启动后，执行“实现 book-manage 前端（查看/新增/删除）”任务。
@@ -102,15 +141,22 @@
    - 新增图书
    - 删除图书
    - 数据 localStorage 持久化
+5. 流程验收：
+   - 固定步骤链无漏步（`$start` 到 `$record-session`）
+   - 步骤失败会触发重试或阻断，不会直接跳过
+   - `dev` 场景切窗前具备完整 handoff 字段
+   - `git提交` 命中任务类型策略（`dev` 禁空提交，`planning` 强制空提交）
 
 ## 实施顺序（执行时）
 
 1. 先建 `session-orchestrator` 后端骨架与存盘层。
-2. 接入 mock runner，打通前端实时显示。
-3. 接入 real runner（参考 `codex_app_server_skill_validation_external.py` 适配）。
-4. 完成人工消息打断与事件审计。
-5. 用编排器驱动产出 `book-manage` 并验收。
-6. 导出运行报告 md，和结构化日志交叉核对一致性。
+2. 落地固定步骤链状态机与质量门（含重试、阻断、下一步决策）。
+3. 接入 mock runner，打通前端实时显示。
+4. 接入 real runner（参考 `codex_app_server_skill_validation_external.py` 适配）。
+5. 完成人工消息打断与事件审计。
+6. 落地 `start_new_window` 前的 handoff 校验与提交策略校验。
+7. 用编排器驱动产出 `book-manage` 并验收。
+8. 导出运行报告 md，和结构化日志交叉核对一致性。
 
 ## 假设与默认值
 
