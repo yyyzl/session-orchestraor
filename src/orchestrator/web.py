@@ -52,6 +52,7 @@ class SessionOrchestratorHttpServer:
     def _build_handler(self):
         orchestrator = self.orchestrator
         static_root = self.static_root
+        book_manage_root = orchestrator.project_root / "book-manage"
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
@@ -60,6 +61,14 @@ class SessionOrchestratorHttpServer:
                     path = parsed.path
                     if path == "/api/health":
                         return self._json(200, {"status": "ok"})
+
+                    if path == "/favicon.ico":
+                        candidate = (static_root / "favicon.ico").resolve()
+                        if candidate.exists() and candidate.is_file():
+                            return self._serve_static(path)
+                        self.send_response(204)
+                        self.end_headers()
+                        return None
 
                     if path.startswith("/api/runs/") and path.endswith("/events"):
                         run_id = path[len("/api/runs/") : -len("/events")].strip("/")
@@ -88,6 +97,13 @@ class SessionOrchestratorHttpServer:
                         run_id = path[len("/api/runs/") :].strip("/")
                         snapshot = orchestrator.get_snapshot(run_id)
                         return self._json(200, snapshot)
+
+                    if path == "/book-manage" or path.startswith("/book-manage/"):
+                        return self._serve_static(
+                            path,
+                            static_override=book_manage_root,
+                            mount_prefix="/book-manage",
+                        )
 
                     return self._serve_static(path)
                 except KeyError as exc:
@@ -143,15 +159,38 @@ class SessionOrchestratorHttpServer:
                 except Exception as exc:  # noqa: BLE001
                     return self._json(500, {"error": str(exc)})
 
-            def _serve_static(self, path: str):
-                normalized = path.strip("/") or "index.html"
+            def _serve_static(
+                self,
+                path: str,
+                *,
+                static_override: Optional[Path] = None,
+                mount_prefix: str = "",
+            ):
+                effective_root = (static_override or static_root).resolve()
+                normalized_path = path
+                if mount_prefix and path.startswith(mount_prefix):
+                    normalized_path = path[len(mount_prefix) :]
+
+                normalized = normalized_path.strip("/") or "index.html"
                 if normalized == "":
                     normalized = "index.html"
-                target = (static_root / normalized).resolve()
+                if normalized == "index":
+                    normalized = "index.html"
+                target = (effective_root / normalized).resolve()
                 try:
-                    target.relative_to(static_root.resolve())
+                    target.relative_to(effective_root)
                 except ValueError:
                     return self._json(403, {"error": "forbidden"})
+
+                if not target.exists() or not target.is_file():
+                    if "." not in normalized:
+                        fallback = (effective_root / "index.html").resolve()
+                        if fallback.exists() and fallback.is_file():
+                            target = fallback
+                        else:
+                            return self._json(404, {"error": "static file not found"})
+                    else:
+                        return self._json(404, {"error": "static file not found"})
 
                 if not target.exists() or not target.is_file():
                     return self._json(404, {"error": "static file not found"})

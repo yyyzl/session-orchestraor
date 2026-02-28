@@ -22,8 +22,8 @@ def main() -> int:
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
-    runtime_root = project_root / "session-orchestrator" / "runtime"
-    static_root = project_root / "session-orchestrator" / "frontend"
+    runtime_root = project_root / "runtime"
+    static_root = project_root / "src" / "frontend"
     orchestrator = SessionOrchestrator(
         project_root=project_root,
         runtime_root=runtime_root,

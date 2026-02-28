@@ -121,11 +121,15 @@ class MockRunner(BaseRunner):
             )
 
         if "实现" in text or "book-manage" in text:
-            self._ensure_book_manage_app()
+            app_kind = self._resolve_mock_app_kind(text)
+            if app_kind == "counter":
+                self._ensure_counter_app()
+                summary = "counter 页面已生成：点击按钮可实时 +1。"
+            else:
+                self._ensure_book_manage_app()
+                summary = "book-manage 已生成：支持查看、新增、删除，且数据写入 localStorage。"
             return RunnerStepResult(
-                model_output_text=(
-                    "book-manage 已生成：支持查看、新增、删除，且数据写入 localStorage。"
-                ),
+                model_output_text=summary,
                 next_command_text="",
                 done=True,
                 meta={"phase": "implement", "step_status": "passed"},
@@ -148,6 +152,7 @@ class MockRunner(BaseRunner):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Book Manage</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -333,6 +338,111 @@ button {
   render();
 })();
 """
+        (app_dir / "index.html").write_text(html, encoding="utf-8")
+        (app_dir / "styles.css").write_text(css, encoding="utf-8")
+        (app_dir / "app.js").write_text(js, encoding="utf-8")
+
+    @staticmethod
+    def _resolve_mock_app_kind(command_text: str) -> str:
+        text = (command_text or "").lower()
+        counter_markers = ("加一", "计数器", "counter", "increment", "+1")
+        if any(marker in text for marker in counter_markers):
+            return "counter"
+        return "book-manage"
+
+    def _ensure_counter_app(self) -> None:
+        app_dir = self.project_root / "book-manage"
+        app_dir.mkdir(parents=True, exist_ok=True)
+
+        html = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Increment Counter</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="counter-shell">
+    <h1>计数器页面</h1>
+    <p>点击按钮后，数字应立即加 1。</p>
+    <div class="counter-box">
+      <strong id="count-value">0</strong>
+      <button id="increment-btn" type="button">+1</button>
+    </div>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>
+"""
+        css = """:root {
+  --bg: #f3f7f9;
+  --ink: #102a43;
+  --accent: #0f766e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+  background:
+    radial-gradient(circle at 12% 12%, #ccfbf1 0%, transparent 35%),
+    linear-gradient(150deg, #f8fafc 0%, var(--bg) 100%);
+  color: var(--ink);
+}
+.counter-shell {
+  width: min(560px, calc(100vw - 24px));
+  border-radius: 14px;
+  border: 1px solid #d9e2ec;
+  background: #fff;
+  padding: 20px;
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.08);
+}
+h1 { margin: 0; }
+p { margin: 10px 0 0; color: #486581; }
+.counter-box {
+  margin-top: 18px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+#count-value {
+  min-width: 64px;
+  font-size: 2.2rem;
+  text-align: center;
+}
+#increment-btn {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+}
+"""
+        js = """(() => {
+  const valueNode = document.getElementById("count-value");
+  const incrementButton = document.getElementById("increment-btn");
+  let count = 0;
+
+  const render = () => {
+    valueNode.textContent = String(count);
+  };
+
+  incrementButton.addEventListener("click", () => {
+    count += 1;
+    render();
+  });
+
+  render();
+})();
+"""
+
         (app_dir / "index.html").write_text(html, encoding="utf-8")
         (app_dir / "styles.css").write_text(css, encoding="utf-8")
         (app_dir / "app.js").write_text(js, encoding="utf-8")

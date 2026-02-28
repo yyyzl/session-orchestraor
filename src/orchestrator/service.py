@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 import uuid
@@ -28,7 +29,34 @@ def _infer_dev_track(task_prompt: str) -> str:
     return "frontend"
 
 
-def _build_workflow_steps(*, task_type: str, task_prompt: str) -> list[Dict[str, str]]:
+def _build_scoped_task_prompt(task_prompt: str) -> str:
+    scoped_root = "book-manage/"
+    normalized = (task_prompt or "").strip()
+    if not normalized:
+        normalized = "完成当前需求"
+    return (
+        f"在目录 {scoped_root} 下完成任务：{normalized}\n"
+        f"约束：所有新增或修改文件必须位于 {scoped_root}；不要改动其他业务目录。"
+    )
+
+
+def _build_git_commit_command(*, mode: str) -> str:
+    if mode != "real":
+        return "git提交"
+
+    return (
+        "请你直接执行 git 提交，不要只给命令建议。\n"
+        "硬性要求：\n"
+        "1) 仅提交 book-manage/ 下变更，不要提交其他目录。\n"
+        "2) 先执行 git add book-manage/。\n"
+        "3) 执行 git commit，message 必须使用：feat(book-manage): 产出本轮前端页面。\n"
+        "4) 提交后执行 git rev-parse --short HEAD 与 git show --name-only --pretty=format:%H%n%s -1。\n"
+        "5) 在最终输出中给出 COMMIT_ID=<hash> 与 COMMIT_MESSAGE=<message>。\n"
+        "6) 如果 book-manage/ 无可提交变更，返回 FAIL_NO_CHANGES。"
+    )
+
+
+def _build_workflow_steps(*, task_type: str, task_prompt: str, mode: str) -> list[Dict[str, str]]:
     if task_type != "dev":
         return []
 
@@ -39,10 +67,10 @@ def _build_workflow_steps(*, task_type: str, task_prompt: str) -> list[Dict[str,
     return [
         {"name": "$start", "command": "$start"},
         {"name": before_step, "command": before_step},
-        {"name": "需求实现", "command": task_prompt},
+        {"name": "需求实现", "command": _build_scoped_task_prompt(task_prompt)},
         {"name": check_step, "command": check_step},
         {"name": "$finish-work", "command": "$finish-work"},
-        {"name": "git提交", "command": "git提交"},
+        {"name": "git提交", "command": _build_git_commit_command(mode=mode)},
         {"name": "$record-session", "command": "$record-session"},
     ]
 
@@ -85,7 +113,7 @@ class SessionOrchestrator:
         runner_factory_map: Optional[Dict[str, Callable[..., Any]]] = None,
     ) -> None:
         self.project_root = project_root or Path(__file__).resolve().parents[2]
-        self.runtime_root = runtime_root or (self.project_root / "session-orchestrator" / "runtime")
+        self.runtime_root = runtime_root or (self.project_root / "runtime")
         self.store = RuntimeStore(runtime_root=self.runtime_root)
         self.runner_factory_map = runner_factory_map or {
             "mock": MockRunner,
@@ -118,8 +146,9 @@ class SessionOrchestrator:
         if mode not in self.runner_factory_map:
             raise ValueError(f"不支持的 mode: {mode}")
 
-        workflow_steps = _build_workflow_steps(task_type=task_type, task_prompt=task_prompt)
+        workflow_steps = _build_workflow_steps(task_type=task_type, task_prompt=task_prompt, mode=mode)
         if workflow_steps:
+            max_rounds = max(max_rounds, len(workflow_steps))
             max_rounds_per_window = max(max_rounds_per_window, len(workflow_steps))
 
         run_id = f"run-{uuid.uuid4().hex[:12]}"
@@ -312,6 +341,9 @@ class SessionOrchestrator:
                     )
 
                 step_started_at = datetime.now(timezone.utc)
+                git_head_before = ""
+                if self._uses_fixed_workflow(ctx) and step_name == "git提交":
+                    git_head_before = self._git_head_commit()
                 prechecked = self._precheck_step(ctx=ctx, step_name=step_name, command_text=current_command)
                 if prechecked is None:
                     result = runner.run_step(
@@ -323,6 +355,9 @@ class SessionOrchestrator:
                     )
                 else:
                     result = prechecked
+
+                if self._uses_fixed_workflow(ctx) and step_name == "git提交":
+                    result = self._postcheck_git_step(ctx=ctx, result=result, head_before=git_head_before)
 
                 duration_ms = int((datetime.now(timezone.utc) - step_started_at).total_seconds() * 1000)
                 step_status, step_meta = self._resolve_step_result(step_name=step_name, result=result)
@@ -635,9 +670,21 @@ class SessionOrchestrator:
 
     def _capture_commit_evidence(self, ctx: _RunContext, result: RunnerStepResult) -> None:
         meta = result.meta or {}
+        output_text = str(result.model_output_text or "")
+
         commit_id = str(meta.get("commit_id") or "").strip()
         commit_message = str(meta.get("commit_message") or "").strip()
         commit_scope = str(meta.get("commit_scope") or "").strip()
+
+        if not commit_id:
+            commit_id_match = re.search(r"COMMIT_ID\s*=\s*([0-9a-fA-F]{7,40})", output_text)
+            if commit_id_match:
+                commit_id = commit_id_match.group(1)
+
+        if not commit_message:
+            commit_msg_match = re.search(r"COMMIT_MESSAGE\s*=\s*(.+)", output_text)
+            if commit_msg_match:
+                commit_message = commit_msg_match.group(1).strip()
 
         ctx.last_commit_id = commit_id
         ctx.last_commit_message = commit_message
@@ -675,6 +722,78 @@ class SessionOrchestrator:
                 continue
             return True
         return False
+
+    def _git_head_commit(self) -> str:
+        cmd = ["git", "rev-parse", "HEAD"]
+        proc = subprocess.run(  # noqa: S603
+            cmd,
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+        )
+        if proc.returncode != 0:
+            return ""
+        return str(proc.stdout or "").strip()
+
+    def _git_head_subject(self) -> str:
+        cmd = ["git", "show", "-s", "--format=%s", "HEAD"]
+        proc = subprocess.run(  # noqa: S603
+            cmd,
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+        )
+        if proc.returncode != 0:
+            return ""
+        return str(proc.stdout or "").strip()
+
+    def _postcheck_git_step(
+        self,
+        *,
+        ctx: _RunContext,
+        result: RunnerStepResult,
+        head_before: str,
+    ) -> RunnerStepResult:
+        if ctx.mode != "real":
+            return result
+
+        output_text = str(result.model_output_text or "")
+        if "FAIL_NO_CHANGES" in output_text:
+            return RunnerStepResult(
+                model_output_text=output_text,
+                next_command_text=result.next_command_text,
+                done=result.done,
+                meta={"step_status": "failed", "failure_code": "FAIL_NO_CHANGES"},
+            )
+
+        head_after = self._git_head_commit()
+        if not head_after or (head_before and head_after == head_before):
+            return RunnerStepResult(
+                model_output_text=(
+                    f"{output_text}\n\n"
+                    "FAIL_COMMIT_NOT_EXECUTED: git提交步骤未检测到新的提交记录，请实际执行 git commit。"
+                ),
+                next_command_text=result.next_command_text,
+                done=result.done,
+                meta={"step_status": "failed", "failure_code": "FAIL_COMMIT_NOT_EXECUTED"},
+            )
+
+        enriched_meta = dict(result.meta or {})
+        enriched_meta["commit_id"] = enriched_meta.get("commit_id") or head_after
+        enriched_meta["commit_message"] = enriched_meta.get("commit_message") or self._git_head_subject()
+        enriched_meta["step_status"] = "passed"
+        return RunnerStepResult(
+            model_output_text=output_text,
+            next_command_text=result.next_command_text,
+            done=result.done,
+            meta=enriched_meta,
+        )
 
     def _update_status(self, ctx: _RunContext, status: str) -> None:
         ctx.snapshot["status"] = status

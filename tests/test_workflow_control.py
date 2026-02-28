@@ -153,6 +153,116 @@ class _HandoffReadyRunner(_BaseFakeRunner):
         )
 
 
+class _RealNoCommitRunner(_BaseFakeRunner):
+    def run_step(
+        self,
+        *,
+        command_text: str,
+        global_round_index: int,
+        round_index_in_window: int,
+        window_index: int,
+        step_id: str,
+    ) -> RunnerStepResult:
+        if "完成任务" in command_text:
+            target = self.project_root / "book-manage" / "index.html"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("<!doctype html><title>counter</title>", encoding="utf-8")
+            return RunnerStepResult(
+                model_output_text="实现完成",
+                next_command_text="",
+                done=True,
+                meta={"step_status": "passed"},
+            )
+        if "git 提交" in command_text or "git提交" in command_text:
+            return RunnerStepResult(
+                model_output_text="我只能提供命令，不能替你提交。",
+                next_command_text="",
+                done=False,
+                meta={"step_status": "passed"},
+            )
+        return RunnerStepResult(
+            model_output_text=f"{command_text} 已完成",
+            next_command_text="",
+            done=False,
+            meta={"step_status": "passed"},
+        )
+
+
+class _RealCommitRunner(_BaseFakeRunner):
+    def run_step(
+        self,
+        *,
+        command_text: str,
+        global_round_index: int,
+        round_index_in_window: int,
+        window_index: int,
+        step_id: str,
+    ) -> RunnerStepResult:
+        if "完成任务" in command_text:
+            target = self.project_root / "book-manage" / "index.html"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("<!doctype html><title>counter</title>", encoding="utf-8")
+            return RunnerStepResult(
+                model_output_text="实现完成",
+                next_command_text="",
+                done=True,
+                meta={"step_status": "passed"},
+            )
+
+        if "git 提交" in command_text or "git提交" in command_text:
+            subprocess.run(
+                ["git", "add", "book-manage/"],
+                cwd=self.project_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )  # noqa: S603
+            subprocess.run(
+                ["git", "commit", "-m", "feat(book-manage): 产出本轮前端页面。"],
+                cwd=self.project_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )  # noqa: S603
+            commit_id_proc = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=self.project_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )  # noqa: S603
+            commit_msg_proc = subprocess.run(
+                ["git", "show", "-s", "--format=%s", "HEAD"],
+                cwd=self.project_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )  # noqa: S603
+            commit_id = commit_id_proc.stdout.strip()
+            commit_message = commit_msg_proc.stdout.strip()
+            return RunnerStepResult(
+                model_output_text=f"COMMIT_ID={commit_id}\nCOMMIT_MESSAGE={commit_message}",
+                next_command_text="",
+                done=False,
+                meta={"step_status": "passed"},
+            )
+
+        return RunnerStepResult(
+            model_output_text=f"{command_text} 已完成",
+            next_command_text="",
+            done=False,
+            meta={"step_status": "passed"},
+        )
+
+
 class WorkflowControlTests(unittest.TestCase):
     def _init_git_repo(self, root: Path) -> None:
         subprocess.run(
@@ -213,6 +323,37 @@ class WorkflowControlTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"run 未在超时内结束: {run_id}, last={snapshot}")
 
+    def test_default_runtime_root_points_to_project_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            self.assertEqual(orchestrator.runtime_root, root / "runtime")
+
+    def test_default_max_rounds_can_finish_record_session_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t0",
+                task_prompt="实现 book-manage 页面",
+                task_type="dev",
+                mode="mock",
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            commands = [e["command_text"] for e in events if e.get("event_type") == "step_started"]
+            self.assertIn("$record-session", commands)
+
     def test_dev_workflow_executes_full_chain_when_task_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -238,13 +379,45 @@ class WorkflowControlTests(unittest.TestCase):
             expected = [
                 "$start",
                 "$before-frontend-dev",
-                "实现 book-manage 页面",
                 "$check-frontend",
                 "$finish-work",
                 "git提交",
                 "$record-session",
             ]
-            self.assertEqual(commands[:7], expected)
+            self.assertEqual(commands[0], expected[0])
+            self.assertEqual(commands[1], expected[1])
+            self.assertIn("在目录 book-manage/ 下完成任务：实现 book-manage 页面", commands[2])
+            self.assertIn("所有新增或修改文件必须位于 book-manage/", commands[2])
+            self.assertEqual(commands[3], expected[2])
+            self.assertEqual(commands[4], expected[3])
+            self.assertEqual(commands[5], expected[4])
+            self.assertEqual(commands[6], expected[5])
+
+    def test_dev_workflow_forces_outputs_under_book_manage_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t5",
+                task_prompt="实现商城管理后台首页",
+                task_type="dev",
+                mode="mock",
+                max_rounds=12,
+                max_rounds_per_window=12,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            commands = [e["command_text"] for e in events if e.get("event_type") == "step_started"]
+            implementation_command = commands[2]
+            self.assertIn("在目录 book-manage/ 下完成任务：实现商城管理后台首页", implementation_command)
+            self.assertIn("所有新增或修改文件必须位于 book-manage/", implementation_command)
 
     def test_dev_git_commit_requires_code_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,6 +505,64 @@ class WorkflowControlTests(unittest.TestCase):
                 and e.get("meta", {}).get("action") == "start_new_window"
             ]
             self.assertGreaterEqual(len(policy), 1)
+
+    def test_real_mode_git_step_fails_when_commit_not_executed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"real": _RealNoCommitRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-real-fail",
+                task_prompt="生成加一页面",
+                task_type="dev",
+                mode="real",
+                max_rounds=12,
+                max_rounds_per_window=12,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "failed")
+            events = orchestrator.get_events(run_id)
+            failures = [
+                e
+                for e in events
+                if e.get("event_type") == "step_finished"
+                and e.get("meta", {}).get("failure_code") == "FAIL_COMMIT_NOT_EXECUTED"
+            ]
+            self.assertGreaterEqual(len(failures), 1)
+
+    def test_real_mode_git_step_passes_after_actual_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"real": _RealCommitRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-real-pass",
+                task_prompt="生成加一页面",
+                task_type="dev",
+                mode="real",
+                max_rounds=12,
+                max_rounds_per_window=12,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            git_step_output = [
+                e
+                for e in events
+                if e.get("event_type") == "model_output" and e.get("meta", {}).get("step_name") == "git提交"
+            ]
+            self.assertGreaterEqual(len(git_step_output), 1)
+            combined_text = "\n".join(str(e.get("model_output_text") or "") for e in git_step_output)
+            self.assertIn("COMMIT_ID=", combined_text)
 
 
 if __name__ == "__main__":

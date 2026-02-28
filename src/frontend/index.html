@@ -4,58 +4,64 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Session Orchestrator</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <main class="layout">
-    <header class="title-card">
+  <main class="app-shell">
+    <header class="hero">
       <h1>Session Orchestrator</h1>
-      <p>持续可观测 + 人工可插话 + 结构化审计存盘</p>
+      <p>会话式运行追踪：每一轮输入、输出、状态都实时可见</p>
     </header>
 
-    <section class="card">
-      <h2>启动任务</h2>
-      <form id="start-form" class="grid">
-        <label>任务ID<input id="task-id" value="book-manage-mvp" required></label>
-        <label>模式
+    <section id="setup-view" class="setup-view">
+      <article class="setup-card">
+        <h2>启动任务</h2>
+        <form id="start-form" class="setup-form">
+          <label for="task-id">任务ID</label>
+          <input id="task-id" value="book-manage-mvp" required>
+
+          <label for="mode">模式</label>
           <select id="mode">
             <option value="mock">mock</option>
             <option value="real">real</option>
           </select>
-        </label>
-        <label class="wide">任务提示词
-          <textarea id="task-prompt" rows="3">实现 book-manage 前端（查看/新增/删除），并完成 localStorage 持久化。</textarea>
-        </label>
-        <button type="submit">启动运行</button>
-      </form>
-      <p id="run-id-line" class="muted">run_id: -</p>
+
+          <label for="task-prompt">任务提示词</label>
+          <textarea id="task-prompt" rows="4">实现 book-manage 前端（查看/新增/删除），并完成 localStorage 持久化。</textarea>
+          <button type="submit">启动运行</button>
+        </form>
+      </article>
     </section>
 
-    <section class="card">
-      <h2>状态板</h2>
-      <div class="status-grid">
-        <div><span>执行状态</span><strong id="status">-</strong></div>
-        <div><span>当前窗口</span><strong id="window">-</strong></div>
-        <div><span>窗口轮次</span><strong id="round">-</strong></div>
-        <div><span>当前步骤</span><strong id="step">-</strong></div>
-      </div>
+    <section id="chat-view" class="chat-view is-hidden">
+      <aside class="session-panel">
+        <h2>会话状态</h2>
+        <p id="run-id-line" class="run-id-line">run_id: -</p>
+        <ul class="session-meta">
+          <li><span>执行状态</span><strong id="status">-</strong></li>
+          <li><span>当前窗口</span><strong id="window">-</strong></li>
+          <li><span>窗口轮次</span><strong id="round">-</strong></li>
+          <li><span>当前步骤</span><strong id="step">-</strong></li>
+        </ul>
+        <div class="session-actions">
+          <button id="report-btn" type="button">生成运行报告</button>
+          <button id="restart-btn" type="button" class="ghost">新建运行</button>
+        </div>
+        <pre id="report-box" class="report-box"></pre>
+      </aside>
+
+      <section class="chat-main" aria-label="运行日志会话区">
+        <div id="conversation" class="conversation" aria-live="polite"></div>
+        <form id="operator-form" class="composer">
+          <input id="operator-id" value="human" placeholder="operator_id">
+          <input id="operator-text" placeholder="输入人工消息并中断当前运行">
+          <button type="submit">发送</button>
+        </form>
+      </section>
     </section>
 
-    <section class="card">
-      <h2>即时消息框</h2>
-      <form id="operator-form" class="inline">
-        <input id="operator-id" value="human" placeholder="operator_id">
-        <input id="operator-text" placeholder="输入人工消息并中断当前运行">
-        <button type="submit">发送并中断</button>
-      </form>
-      <button id="report-btn" type="button">生成运行报告</button>
-      <pre id="report-box" class="report-box"></pre>
-    </section>
-
-    <section class="card">
-      <h2>日志区</h2>
-      <ul id="log-list" class="log-list"></ul>
-    </section>
+    <p id="global-alert" class="global-alert" role="alert" aria-live="assertive"></p>
   </main>
   <script src="./app.js"></script>
 </body>
