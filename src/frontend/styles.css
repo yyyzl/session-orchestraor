@@ -1,0 +1,170 @@
+:root {
+  --bg: #f4f7fb;
+  --ink: #13243c;
+  --card: #ffffff;
+  --accent: #0f766e;
+  --line: #d6deea;
+  --warn: #be123c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 90% 0%, #d8f3dc 0%, transparent 35%),
+    linear-gradient(160deg, #f8fafc 0%, var(--bg) 100%);
+}
+
+.layout {
+  max-width: 980px;
+  margin: 24px auto;
+  padding: 0 16px 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.title-card,
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+}
+
+h1, h2 {
+  margin: 0;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin-bottom: 10px;
+}
+
+p {
+  margin: 8px 0 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 10px;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 10px;
+  font: inherit;
+}
+
+button {
+  width: fit-content;
+  border: none;
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-weight: 700;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.status-grid div {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.status-grid span {
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+.inline {
+  display: grid;
+  grid-template-columns: 120px 1fr auto;
+  gap: 10px;
+}
+
+.muted {
+  color: #64748b;
+}
+
+.log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.log-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+
+.log-item[data-type="error"] {
+  border-color: #fecdd3;
+  background: #fff1f2;
+}
+
+.log-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.86rem;
+  color: #475569;
+}
+
+.log-body {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.report-box {
+  min-height: 120px;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+@media (max-width: 768px) {
+  .grid,
+  .status-grid,
+  .inline {
+    grid-template-columns: 1fr;
+  }
+}
