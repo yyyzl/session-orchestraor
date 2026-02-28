@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from .models import RunnerStepResult
 from .runners import MockRunner, RealRunner
 from .storage import RuntimeStore
 
@@ -15,10 +17,41 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _infer_dev_track(task_prompt: str) -> str:
+    text = (task_prompt or "").lower()
+    frontend_keywords = ("front", "frontend", "页面", "ui", "web", "book-manage", "css", "html", "js")
+    backend_keywords = ("backend", "api", "服务", "数据库", "db", "server")
+    frontend_hits = sum(1 for kw in frontend_keywords if kw in text)
+    backend_hits = sum(1 for kw in backend_keywords if kw in text)
+    if backend_hits > frontend_hits:
+        return "backend"
+    return "frontend"
+
+
+def _build_workflow_steps(*, task_type: str, task_prompt: str) -> list[Dict[str, str]]:
+    if task_type != "dev":
+        return []
+
+    track = _infer_dev_track(task_prompt)
+    before_step = "$before-backend-dev" if track == "backend" else "$before-frontend-dev"
+    check_step = "$check-backend" if track == "backend" else "$check-frontend"
+
+    return [
+        {"name": "$start", "command": "$start"},
+        {"name": before_step, "command": before_step},
+        {"name": "需求实现", "command": task_prompt},
+        {"name": check_step, "command": check_step},
+        {"name": "$finish-work", "command": "$finish-work"},
+        {"name": "git提交", "command": "git提交"},
+        {"name": "$record-session", "command": "$record-session"},
+    ]
+
+
 @dataclass
 class _RunContext:
     run_id: str
     task_prompt: str
+    task_type: str
     max_rounds: int
     max_rounds_per_window: int
     mode: str
@@ -32,6 +65,15 @@ class _RunContext:
     stop_requested: bool = False
     thread: Optional[threading.Thread] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+    workflow_steps: list[Dict[str, str]] = field(default_factory=list)
+    workflow_step_index: int = 0
+    workflow_step_attempt: int = 0
+    step_max_retry: int = 1
+    task_done_signal: bool = False
+    last_commit_id: str = ""
+    last_commit_message: str = ""
+    last_commit_scope: str = ""
+    last_model_output: str = ""
 
 
 class SessionOrchestrator:
@@ -65,13 +107,20 @@ class SessionOrchestrator:
         max_rounds_per_window: int = 3,
         step_delay_seconds: float = 0.0,
         codex_bin: Optional[str] = None,
+        step_max_retry: int = 1,
     ) -> str:
         if max_rounds <= 0:
             raise ValueError("max_rounds 必须大于 0")
         if max_rounds_per_window <= 0:
             raise ValueError("max_rounds_per_window 必须大于 0")
+        if step_max_retry < 0:
+            raise ValueError("step_max_retry 必须大于等于 0")
         if mode not in self.runner_factory_map:
             raise ValueError(f"不支持的 mode: {mode}")
+
+        workflow_steps = _build_workflow_steps(task_type=task_type, task_prompt=task_prompt)
+        if workflow_steps:
+            max_rounds_per_window = max(max_rounds_per_window, len(workflow_steps))
 
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         window_id = f"{run_id}-window-1"
@@ -88,6 +137,10 @@ class SessionOrchestrator:
             "mode": mode,
             "model_id": model_id,
             "reasoning_level": reasoning_level,
+            "current_workflow_step": workflow_steps[0]["name"] if workflow_steps else "",
+            "current_workflow_step_index": 0,
+            "current_workflow_step_attempt": 0,
+            "current_workflow_step_status": "pending" if workflow_steps else "",
             "updated_at": _utc_now(),
         }
         self.store.save_snapshot(snapshot)
@@ -95,6 +148,7 @@ class SessionOrchestrator:
         ctx = _RunContext(
             run_id=run_id,
             task_prompt=task_prompt,
+            task_type=task_type,
             max_rounds=max_rounds,
             max_rounds_per_window=max_rounds_per_window,
             mode=mode,
@@ -103,6 +157,8 @@ class SessionOrchestrator:
             step_delay_seconds=step_delay_seconds,
             codex_bin=codex_bin,
             snapshot=snapshot,
+            workflow_steps=workflow_steps,
+            step_max_retry=step_max_retry,
         )
         worker = threading.Thread(target=self._run_loop, args=(ctx,), daemon=True)
         ctx.thread = worker
@@ -185,48 +241,66 @@ class SessionOrchestrator:
                         self._update_status(ctx, "paused")
                         break
 
-                    if (
-                        ctx.snapshot["current_round_index_in_window"] >= ctx.max_rounds_per_window
-                        and int(ctx.snapshot["current_global_round_index"]) > 0
-                    ):
-                        self._append_event(
-                            ctx,
-                            event_type="window_closed",
-                            command_text="",
-                            model_output_text="",
-                            operator_id="",
-                            meta={},
-                        )
-                        ctx.snapshot["current_window_index"] = int(ctx.snapshot["current_window_index"]) + 1
-                        ctx.snapshot["current_window_id"] = (
-                            f"{ctx.run_id}-window-{ctx.snapshot['current_window_index']}"
-                        )
-                        ctx.snapshot["current_round_index_in_window"] = 0
-                        self._persist_snapshot(ctx)
-                        self._append_event(
-                            ctx,
-                            event_type="window_started",
-                            command_text="",
-                            model_output_text="",
-                            operator_id="",
-                            meta={},
-                        )
+                    if not self._uses_fixed_workflow(ctx):
+                        if (
+                            ctx.snapshot["current_round_index_in_window"] >= ctx.max_rounds_per_window
+                            and int(ctx.snapshot["current_global_round_index"]) > 0
+                        ):
+                            self._append_event(
+                                ctx,
+                                event_type="window_closed",
+                                command_text="",
+                                model_output_text="",
+                                operator_id="",
+                                meta={},
+                            )
+                            ctx.snapshot["current_window_index"] = int(ctx.snapshot["current_window_index"]) + 1
+                            ctx.snapshot["current_window_id"] = (
+                                f"{ctx.run_id}-window-{ctx.snapshot['current_window_index']}"
+                            )
+                            ctx.snapshot["current_round_index_in_window"] = 0
+                            self._persist_snapshot(ctx)
+                            self._append_event(
+                                ctx,
+                                event_type="window_started",
+                                command_text="",
+                                model_output_text="",
+                                operator_id="",
+                                meta={},
+                            )
+
+                    step_name = "task_prompt"
+                    if self._uses_fixed_workflow(ctx):
+                        step = self._current_workflow_step(ctx)
+                        step_name = step["name"]
+                        current_command = step["command"]
 
                     next_global_round = int(ctx.snapshot["current_global_round_index"]) + 1
                     next_round_in_window = int(ctx.snapshot["current_round_index_in_window"]) + 1
                     step_id = f"step-{next_global_round}"
+                    step_attempt = ctx.workflow_step_attempt + 1 if self._uses_fixed_workflow(ctx) else 1
+
                     ctx.snapshot["current_global_round_index"] = next_global_round
                     ctx.snapshot["current_round_index_in_window"] = next_round_in_window
                     ctx.snapshot["current_step_id"] = step_id
+                    if self._uses_fixed_workflow(ctx):
+                        ctx.snapshot["current_workflow_step"] = step_name
+                        ctx.snapshot["current_workflow_step_index"] = ctx.workflow_step_index
+                        ctx.snapshot["current_workflow_step_attempt"] = step_attempt
+                        ctx.snapshot["current_workflow_step_status"] = "running"
                     self._persist_snapshot(ctx)
 
+                    step_meta = {
+                        "step_name": step_name,
+                        "step_attempt": step_attempt,
+                    }
                     self._append_event(
                         ctx,
                         event_type="step_started",
                         command_text=current_command,
                         model_output_text="",
                         operator_id="",
-                        meta={},
+                        meta=step_meta,
                     )
                     self._append_event(
                         ctx,
@@ -234,20 +308,29 @@ class SessionOrchestrator:
                         command_text=current_command,
                         model_output_text="",
                         operator_id="",
-                        meta={},
+                        meta=step_meta,
                     )
 
                 step_started_at = datetime.now(timezone.utc)
-                result = runner.run_step(
-                    command_text=current_command,
-                    global_round_index=next_global_round,
-                    round_index_in_window=next_round_in_window,
-                    window_index=int(ctx.snapshot["current_window_index"]),
-                    step_id=step_id,
-                )
+                prechecked = self._precheck_step(ctx=ctx, step_name=step_name, command_text=current_command)
+                if prechecked is None:
+                    result = runner.run_step(
+                        command_text=current_command,
+                        global_round_index=next_global_round,
+                        round_index_in_window=next_round_in_window,
+                        window_index=int(ctx.snapshot["current_window_index"]),
+                        step_id=step_id,
+                    )
+                else:
+                    result = prechecked
+
                 duration_ms = int((datetime.now(timezone.utc) - step_started_at).total_seconds() * 1000)
+                step_status, step_meta = self._resolve_step_result(step_name=step_name, result=result)
 
                 with ctx.lock:
+                    ctx.last_model_output = result.model_output_text
+                    model_meta = dict(step_meta)
+                    model_meta.update(result.meta or {})
                     self._append_event(
                         ctx,
                         event_type="model_output",
@@ -255,7 +338,7 @@ class SessionOrchestrator:
                         model_output_text=result.model_output_text,
                         operator_id="",
                         duration_ms=duration_ms,
-                        meta=result.meta,
+                        meta=model_meta,
                     )
                     self._append_event(
                         ctx,
@@ -264,8 +347,12 @@ class SessionOrchestrator:
                         model_output_text=result.model_output_text,
                         operator_id="",
                         duration_ms=duration_ms,
-                        meta={},
+                        meta=step_meta,
                     )
+
+                    if self._uses_fixed_workflow(ctx):
+                        ctx.snapshot["current_workflow_step_status"] = step_status
+                        self._persist_snapshot(ctx)
 
                     if ctx.interrupted:
                         self._append_event(
@@ -279,18 +366,86 @@ class SessionOrchestrator:
                         self._update_status(ctx, "paused")
                         break
 
-                    if result.done:
-                        self._append_event(
-                            ctx,
-                            event_type="window_closed",
-                            command_text="",
-                            model_output_text="",
-                            operator_id="",
-                            meta={"reason": "completed"},
-                        )
-                        self._update_status(ctx, "completed")
+                    if step_status == "passed":
+                        if step_name == "git提交":
+                            self._capture_commit_evidence(ctx, result)
+                        if result.done:
+                            ctx.task_done_signal = True
+
+                        if self._uses_fixed_workflow(ctx):
+                            self._advance_workflow_step(ctx)
+                            if self._workflow_finished(ctx):
+                                if ctx.task_done_signal:
+                                    self._append_event(
+                                        ctx,
+                                        event_type="window_closed",
+                                        command_text="",
+                                        model_output_text="",
+                                        operator_id="",
+                                        meta={"reason": "completed"},
+                                    )
+                                    self._update_status(ctx, "completed")
+                                    break
+                                switched = self._start_new_window(ctx, reason="workflow_completed")
+                                if not switched:
+                                    self._update_status(ctx, "failed")
+                                    break
+                                continue
+                            continue
+
+                        if result.done:
+                            self._append_event(
+                                ctx,
+                                event_type="window_closed",
+                                command_text="",
+                                model_output_text="",
+                                operator_id="",
+                                meta={"reason": "completed"},
+                            )
+                            self._update_status(ctx, "completed")
+                            break
+                        current_command = result.next_command_text or current_command
+                    else:
+                        if self._uses_fixed_workflow(ctx) and ctx.workflow_step_attempt < ctx.step_max_retry:
+                            ctx.workflow_step_attempt += 1
+                            ctx.snapshot["current_workflow_step_attempt"] = ctx.workflow_step_attempt + 1
+                            ctx.snapshot["current_workflow_step_status"] = "retrying"
+                            self._persist_snapshot(ctx)
+                            self._append_event(
+                                ctx,
+                                event_type="step_retrying",
+                                command_text=current_command,
+                                model_output_text=result.model_output_text,
+                                operator_id="",
+                                meta={
+                                    "step_name": step_name,
+                                    "step_attempt": ctx.workflow_step_attempt + 1,
+                                    "failure_code": step_meta.get("failure_code", ""),
+                                },
+                            )
+                            continue
+
+                        if self._uses_fixed_workflow(ctx):
+                            self._append_event(
+                                ctx,
+                                event_type="policy_decision",
+                                command_text=current_command,
+                                model_output_text="",
+                                operator_id="",
+                                meta={
+                                    "action": "start_new_window",
+                                    "reason": "retry_exhausted",
+                                    "step_name": step_name,
+                                },
+                            )
+                            switched = self._start_new_window(ctx, reason="retry_exhausted")
+                            if not switched:
+                                self._update_status(ctx, "failed")
+                                break
+                            continue
+
+                        self._update_status(ctx, "failed")
                         break
-                    current_command = result.next_command_text or current_command
             else:
                 with ctx.lock:
                     self._append_event(
@@ -316,6 +471,210 @@ class SessionOrchestrator:
         finally:
             runner.stop()
             self.store.save_snapshot(ctx.snapshot)
+
+    def _uses_fixed_workflow(self, ctx: _RunContext) -> bool:
+        return bool(ctx.workflow_steps)
+
+    def _current_workflow_step(self, ctx: _RunContext) -> Dict[str, str]:
+        return ctx.workflow_steps[ctx.workflow_step_index]
+
+    def _advance_workflow_step(self, ctx: _RunContext) -> None:
+        ctx.workflow_step_index += 1
+        ctx.workflow_step_attempt = 0
+        if ctx.workflow_step_index < len(ctx.workflow_steps):
+            ctx.snapshot["current_workflow_step"] = ctx.workflow_steps[ctx.workflow_step_index]["name"]
+            ctx.snapshot["current_workflow_step_index"] = ctx.workflow_step_index
+            ctx.snapshot["current_workflow_step_attempt"] = 0
+            ctx.snapshot["current_workflow_step_status"] = "pending"
+            self._persist_snapshot(ctx)
+
+    def _workflow_finished(self, ctx: _RunContext) -> bool:
+        return ctx.workflow_step_index >= len(ctx.workflow_steps)
+
+    def _start_new_window(self, ctx: _RunContext, *, reason: str) -> bool:
+        handoff = self._build_handoff(ctx)
+        missing = self._validate_handoff(ctx, handoff)
+        if missing:
+            self._append_event(
+                ctx,
+                event_type="handoff_blocked",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={
+                    "reason": reason,
+                    "missing_fields": missing,
+                },
+            )
+            return False
+
+        self._append_event(
+            ctx,
+            event_type="handoff_validated",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={"handoff": handoff},
+        )
+        self._append_event(
+            ctx,
+            event_type="policy_decision",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={"action": "start_new_window", "reason": reason},
+        )
+        self._append_event(
+            ctx,
+            event_type="window_closed",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={"reason": reason},
+        )
+
+        ctx.snapshot["current_window_index"] = int(ctx.snapshot["current_window_index"]) + 1
+        ctx.snapshot["current_window_id"] = f"{ctx.run_id}-window-{ctx.snapshot['current_window_index']}"
+        ctx.snapshot["current_round_index_in_window"] = 0
+        ctx.snapshot["current_step_id"] = ""
+        ctx.workflow_step_index = 0
+        ctx.workflow_step_attempt = 0
+        if ctx.workflow_steps:
+            ctx.snapshot["current_workflow_step"] = ctx.workflow_steps[0]["name"]
+            ctx.snapshot["current_workflow_step_index"] = 0
+            ctx.snapshot["current_workflow_step_attempt"] = 0
+            ctx.snapshot["current_workflow_step_status"] = "pending"
+        self._persist_snapshot(ctx)
+        self._append_event(
+            ctx,
+            event_type="window_started",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={"handoff": handoff},
+        )
+        return True
+
+    def _build_handoff(self, ctx: _RunContext) -> Dict[str, Any]:
+        completed = [step["name"] for step in ctx.workflow_steps]
+        return {
+            "task_id": ctx.snapshot.get("task_id", ""),
+            "task_goal": ctx.task_prompt,
+            "current_stage": "window_completed",
+            "completed_steps": completed,
+            "pending_steps": [step["name"] for step in ctx.workflow_steps],
+            "last_round_result": ctx.last_model_output,
+            "last_commit_id": ctx.last_commit_id,
+            "last_commit_message": ctx.last_commit_message,
+            "last_commit_scope": ctx.last_commit_scope,
+            "known_issues": [],
+            "next_actions": [ctx.task_prompt],
+        }
+
+    def _validate_handoff(self, ctx: _RunContext, handoff: Dict[str, Any]) -> list[str]:
+        required = ["task_goal"]
+        if ctx.task_type == "dev":
+            required.extend(["last_commit_id", "last_commit_message"])
+        return [field for field in required if not str(handoff.get(field, "")).strip()]
+
+    def _precheck_step(
+        self,
+        *,
+        ctx: _RunContext,
+        step_name: str,
+        command_text: str,
+    ) -> Optional[RunnerStepResult]:
+        if step_name != "git提交":
+            return None
+
+        has_changes = self._detect_git_changes()
+        if has_changes is False and ctx.task_type == "dev":
+            return RunnerStepResult(
+                model_output_text="dev 场景禁止空提交：工作区无代码变更。",
+                next_command_text=command_text,
+                done=False,
+                meta={
+                    "step_status": "failed",
+                    "failure_code": "FAIL_NO_CHANGES",
+                    "has_code_changes": False,
+                },
+            )
+        if has_changes is False and ctx.task_type == "planning":
+            return RunnerStepResult(
+                model_output_text="planning 场景无代码变更：允许空提交。",
+                next_command_text=command_text,
+                done=False,
+                meta={
+                    "step_status": "passed",
+                    "allow_empty_commit": True,
+                    "has_code_changes": False,
+                },
+            )
+        return None
+
+    def _resolve_step_result(self, *, step_name: str, result: RunnerStepResult) -> tuple[str, Dict[str, Any]]:
+        output_text = str(result.model_output_text or "")
+        meta = dict(result.meta or {})
+        raw_status = str(meta.get("step_status") or "").lower().strip()
+        if raw_status not in {"passed", "failed"}:
+            if "FAIL_" in output_text:
+                raw_status = "failed"
+            else:
+                raw_status = "passed"
+
+        step_meta = {
+            "step_name": step_name,
+            "step_status": raw_status,
+            "failure_code": str(meta.get("failure_code") or ""),
+        }
+        if "has_code_changes" in meta:
+            step_meta["has_code_changes"] = meta.get("has_code_changes")
+        if "allow_empty_commit" in meta:
+            step_meta["allow_empty_commit"] = meta.get("allow_empty_commit")
+        return raw_status, step_meta
+
+    def _capture_commit_evidence(self, ctx: _RunContext, result: RunnerStepResult) -> None:
+        meta = result.meta or {}
+        commit_id = str(meta.get("commit_id") or "").strip()
+        commit_message = str(meta.get("commit_message") or "").strip()
+        commit_scope = str(meta.get("commit_scope") or "").strip()
+
+        ctx.last_commit_id = commit_id
+        ctx.last_commit_message = commit_message
+        ctx.last_commit_scope = commit_scope
+
+    def _detect_git_changes(self) -> Optional[bool]:
+        cmd = ["git", "status", "--porcelain"]
+        proc = subprocess.run(  # noqa: S603
+            cmd,
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        ignored_prefixes = (
+            "runtime/",
+            "src/runtime/",
+            "session-orchestrator/runtime/",
+        )
+        for raw_line in proc.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if len(line) < 4:
+                continue
+            path_part = line[3:].strip()
+            if path_part.startswith('"') and path_part.endswith('"'):
+                path_part = path_part[1:-1]
+            normalized = path_part.replace("\\", "/")
+            if any(normalized.startswith(prefix) for prefix in ignored_prefixes):
+                continue
+            return True
+        return False
 
     def _update_status(self, ctx: _RunContext, status: str) -> None:
         ctx.snapshot["status"] = status

@@ -65,42 +65,77 @@ class MockRunner(BaseRunner):
     ) -> RunnerStepResult:
         self._delay_if_needed()
 
-        if global_round_index == 1:
+        text = (command_text or "").strip()
+        if text == "$start":
             return RunnerStepResult(
-                model_output_text=(
-                    "已完成任务拆解：先落地 book-manage 页面骨架，再补齐新增/删除与 localStorage 持久化。"
-                ),
-                next_command_text="请开始实现页面与交互逻辑，并保证可直接打开使用。",
+                model_output_text="已完成会话初始化，准备进入开发流程。",
+                next_command_text="",
                 done=False,
-                meta={"phase": "plan"},
+                meta={"phase": "start", "step_status": "passed"},
             )
 
-        if global_round_index == 2:
+        if text in {"$before-frontend-dev", "$before-backend-dev"}:
+            return RunnerStepResult(
+                model_output_text=f"已加载开发规范：{text}。",
+                next_command_text="",
+                done=False,
+                meta={"phase": "before-dev", "step_status": "passed"},
+            )
+
+        if text in {"$check-frontend", "$check-backend"}:
+            return RunnerStepResult(
+                model_output_text="已完成质量检查，当前窗口产物符合预期。",
+                next_command_text="",
+                done=False,
+                meta={"phase": "check", "step_status": "passed"},
+            )
+
+        if text == "$finish-work":
+            return RunnerStepResult(
+                model_output_text="已完成收尾：更新说明并整理待确认项。",
+                next_command_text="",
+                done=False,
+                meta={"phase": "finish-work", "step_status": "passed"},
+            )
+
+        if text == "git提交":
+            return RunnerStepResult(
+                model_output_text="已生成提交信息，等待执行提交。",
+                next_command_text="",
+                done=False,
+                meta={
+                    "phase": "git-commit",
+                    "step_status": "passed",
+                    "commit_id": f"mock-{global_round_index:04d}",
+                    "commit_message": "feat: 增加 book-manage 前端页面与交互",
+                    "commit_scope": "book-manage",
+                },
+            )
+
+        if text == "$record-session":
+            return RunnerStepResult(
+                model_output_text="已记录本窗口会话摘要与变更信息。",
+                next_command_text="",
+                done=False,
+                meta={"phase": "record-session", "step_status": "passed"},
+            )
+
+        if "实现" in text or "book-manage" in text:
             self._ensure_book_manage_app()
             return RunnerStepResult(
                 model_output_text=(
                     "book-manage 已生成：支持查看、新增、删除，且数据写入 localStorage。"
                 ),
-                next_command_text="请执行验收并输出结论。",
-                done=False,
-                meta={"phase": "implement"},
-            )
-
-        if global_round_index == 3:
-            return RunnerStepResult(
-                model_output_text=(
-                    "验收完成：首页可查看列表；可新增图书；可删除图书；刷新后可从 localStorage 恢复。"
-                ),
                 next_command_text="",
                 done=True,
-                meta={"phase": "verify"},
+                meta={"phase": "implement", "step_status": "passed"},
             )
 
         return RunnerStepResult(
-            model_output_text="mock runner 已无后续步骤。",
+            model_output_text="mock runner 已执行当前步骤。",
             next_command_text="",
-            done=True,
-            meta={"phase": "finish"},
+            done=False,
+            meta={"phase": "default", "step_status": "passed"},
         )
 
     def _ensure_book_manage_app(self) -> None:
