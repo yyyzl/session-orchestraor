@@ -1,3 +1,13 @@
-﻿src/runtime/
+src/runtime/
+session-orchestrator/runtime/
 __pycache__/
 *.pyc
+.venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+node_modules/
