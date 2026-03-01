@@ -17,7 +17,7 @@ def main() -> int:
         "--project-root",
         type=str,
         default=str(Path(__file__).resolve().parents[1]),
-        help="项目根目录，用于定位 runtime/book-manage",
+        help="编排器项目根目录，用于定位 runtime 与前端静态资源",
     )
     args = parser.parse_args()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -121,12 +122,13 @@ class MockRunner(BaseRunner):
             )
 
         if "实现" in text or "book-manage" in text:
+            target_dir = self._resolve_target_dir(text)
             app_kind = self._resolve_mock_app_kind(text)
             if app_kind == "counter":
-                self._ensure_counter_app()
+                self._ensure_counter_app(target_dir)
                 summary = "counter 页面已生成：点击按钮可实时 +1。"
             else:
-                self._ensure_book_manage_app()
+                self._ensure_book_manage_app(target_dir)
                 summary = "book-manage 已生成：支持查看、新增、删除，且数据写入 localStorage。"
             return RunnerStepResult(
                 model_output_text=summary,
@@ -142,8 +144,7 @@ class MockRunner(BaseRunner):
             meta={"phase": "default", "step_status": "passed"},
         )
 
-    def _ensure_book_manage_app(self) -> None:
-        app_dir = self.project_root / "book-manage"
+    def _ensure_book_manage_app(self, app_dir: Path) -> None:
         app_dir.mkdir(parents=True, exist_ok=True)
 
         html = """<!doctype html>
@@ -350,8 +351,7 @@ button {
             return "counter"
         return "book-manage"
 
-    def _ensure_counter_app(self) -> None:
-        app_dir = self.project_root / "book-manage"
+    def _ensure_counter_app(self, app_dir: Path) -> None:
         app_dir.mkdir(parents=True, exist_ok=True)
 
         html = """<!doctype html>
@@ -446,6 +446,26 @@ p { margin: 10px 0 0; color: #486581; }
         (app_dir / "index.html").write_text(html, encoding="utf-8")
         (app_dir / "styles.css").write_text(css, encoding="utf-8")
         (app_dir / "app.js").write_text(js, encoding="utf-8")
+
+    def _resolve_target_dir(self, command_text: str) -> Path:
+        match = re.search(r"在目录\s+(.+?)\s+下完成任务", command_text or "")
+        if not match:
+            return self.project_root / "book-manage"
+
+        raw_scope = match.group(1).strip().strip("'\"")
+        if not raw_scope or raw_scope in {"仓库根目录", "."}:
+            return self.project_root
+
+        normalized = raw_scope.replace("\\", "/")
+        if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+            return self.project_root / "book-manage"
+
+        parts = [part for part in normalized.split("/") if part and part != "."]
+        if any(part == ".." for part in parts):
+            return self.project_root / "book-manage"
+        if not parts:
+            return self.project_root
+        return self.project_root.joinpath(*parts)
 
 
 def build_turn_sandbox_policy(sandbox_mode: str) -> dict[str, Any]:

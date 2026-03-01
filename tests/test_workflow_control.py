@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import time
@@ -8,6 +9,13 @@ from pathlib import Path
 
 from orchestrator.models import RunnerStepResult
 from orchestrator.service import SessionOrchestrator
+
+
+def _extract_scope_path(command_text: str, default_scope: str = "book-manage/") -> str:
+    match = re.search(r"在目录\s+(.+?)\s+下完成任务", command_text or "")
+    if not match:
+        return default_scope
+    return match.group(1).strip() or default_scope
 
 
 class _BaseFakeRunner:
@@ -54,6 +62,75 @@ class _HappyWorkflowRunner(_BaseFakeRunner):
             )
         return RunnerStepResult(
             model_output_text=f"{command_text} 已完成",
+            next_command_text="",
+            done=False,
+            meta={"step_status": "passed"},
+        )
+
+
+class _ScopedWorkflowRunner(_BaseFakeRunner):
+    def run_step(
+        self,
+        *,
+        command_text: str,
+        global_round_index: int,
+        round_index_in_window: int,
+        window_index: int,
+        step_id: str,
+    ) -> RunnerStepResult:
+        if "下完成任务" in command_text:
+            scope_path = _extract_scope_path(command_text, "apps/web/")
+            scope_dir = self.project_root / scope_path.strip("/")
+            scope_dir.mkdir(parents=True, exist_ok=True)
+            (scope_dir / "index.html").write_text("<!doctype html><title>scoped</title>", encoding="utf-8")
+            return RunnerStepResult(
+                model_output_text="作用域实现完成",
+                next_command_text="",
+                done=True,
+                meta={"step_status": "passed"},
+            )
+        if command_text == "git提交":
+            return RunnerStepResult(
+                model_output_text="git 提交通过",
+                next_command_text="",
+                done=False,
+                meta={
+                    "step_status": "passed",
+                    "commit_id": "scope123",
+                    "commit_message": "feat(scope): scoped output",
+                    "commit_scope": "apps/web/",
+                },
+            )
+        return RunnerStepResult(
+            model_output_text=f"{command_text} 已完成",
+            next_command_text="",
+            done=False,
+            meta={"step_status": "passed"},
+        )
+
+
+class _OutOfScopeChangeRunner(_BaseFakeRunner):
+    def run_step(
+        self,
+        *,
+        command_text: str,
+        global_round_index: int,
+        round_index_in_window: int,
+        window_index: int,
+        step_id: str,
+    ) -> RunnerStepResult:
+        if "下完成任务" in command_text:
+            target = self.project_root / "outside" / "index.html"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("<!doctype html><title>outside</title>", encoding="utf-8")
+            return RunnerStepResult(
+                model_output_text="仅在作用域外写入文件",
+                next_command_text="",
+                done=True,
+                meta={"step_status": "passed"},
+            )
+        return RunnerStepResult(
+            model_output_text=f"{command_text} 已处理",
             next_command_text="",
             done=False,
             meta={"step_status": "passed"},
@@ -505,6 +582,92 @@ class WorkflowControlTests(unittest.TestCase):
                 and e.get("meta", {}).get("action") == "start_new_window"
             ]
             self.assertGreaterEqual(len(policy), 1)
+
+    def test_can_run_against_external_workspace_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            orchestrator_root = root / "orchestrator"
+            external_root = root / "external-app"
+            orchestrator_root.mkdir(parents=True, exist_ok=True)
+            external_root.mkdir(parents=True, exist_ok=True)
+            self._init_git_repo(external_root)
+
+            orchestrator = SessionOrchestrator(
+                project_root=orchestrator_root,
+                runtime_root=orchestrator_root / "runtime",
+                runner_factory_map={"mock": _ScopedWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-external",
+                task_prompt="实现外部项目页面",
+                task_type="dev",
+                mode="mock",
+                max_rounds=12,
+                max_rounds_per_window=12,
+                workspace_project_root=str(external_root),
+                git_scope_path="apps/web/",
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+            self.assertEqual(snapshot.get("workspace_project_root"), str(external_root.resolve()))
+            self.assertEqual(snapshot.get("git_scope_path"), "apps/web/")
+            self.assertTrue((external_root / "apps" / "web" / "index.html").exists())
+
+            events = orchestrator.get_events(run_id)
+            commands = [e["command_text"] for e in events if e.get("event_type") == "step_started"]
+            self.assertIn("在目录 apps/web/ 下完成任务：实现外部项目页面", commands[2])
+
+    def test_git_change_detection_is_limited_to_scope_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _OutOfScopeChangeRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-scope-fail",
+                task_prompt="实现但只写作用域外文件",
+                task_type="dev",
+                mode="mock",
+                max_rounds=12,
+                max_rounds_per_window=12,
+                git_scope_path="apps/web/",
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertIn(snapshot.get("status"), {"failed", "completed"})
+
+            events = orchestrator.get_events(run_id)
+            scoped_fail = [
+                e
+                for e in events
+                if e.get("event_type") == "step_finished"
+                and e.get("meta", {}).get("failure_code") == "FAIL_NO_CHANGES"
+            ]
+            self.assertGreaterEqual(len(scoped_fail), 1)
+
+    def test_start_run_rejects_non_git_workspace_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_root = root / "repo"
+            not_repo = root / "not-repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            not_repo.mkdir(parents=True, exist_ok=True)
+            self._init_git_repo(repo_root)
+            orchestrator = SessionOrchestrator(
+                project_root=repo_root,
+                runtime_root=repo_root / "runtime",
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            with self.assertRaises(ValueError):
+                orchestrator.start_run(
+                    task_id="t-invalid-root",
+                    task_prompt="实现页面",
+                    task_type="dev",
+                    mode="mock",
+                    workspace_project_root=str(not_repo),
+                )
 
     def test_real_mode_git_step_fails_when_commit_not_executed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -12,6 +12,8 @@
     chatView: document.getElementById("chat-view"),
     startForm: document.getElementById("start-form"),
     taskId: document.getElementById("task-id"),
+    workspaceProjectRoot: document.getElementById("workspace-project-root"),
+    gitScopePath: document.getElementById("git-scope-path"),
     taskPrompt: document.getElementById("task-prompt"),
     mode: document.getElementById("mode"),
     runIdLine: document.getElementById("run-id-line"),
@@ -273,6 +275,8 @@
       state.since = 0;
       const payload = {
         task_id: els.taskId.value.trim() || "session-task",
+        workspace_project_root: els.workspaceProjectRoot.value.trim() || "",
+        git_scope_path: els.gitScopePath.value.trim() || "",
         task_prompt: els.taskPrompt.value.trim(),
         mode: els.mode.value,
         step_delay_seconds: els.mode.value === "mock" ? 0.35 : 0,

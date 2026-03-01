@@ -131,6 +131,9 @@ class SessionOrchestratorHttpServer:
                             step_delay_seconds=float(body.get("step_delay_seconds") or 0.0),
                             step_max_retry=int(body.get("step_max_retry") or 1),
                             codex_bin=body.get("codex_bin"),
+                            workspace_project_root=body.get("workspace_project_root"),
+                            git_scope_path=body.get("git_scope_path"),
+                            prompt_config_path=body.get("prompt_config_path"),
                         )
                         return self._json(200, {"run_id": run_id})
 

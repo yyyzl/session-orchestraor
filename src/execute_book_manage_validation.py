@@ -19,6 +19,18 @@ def main() -> int:
     )
     parser.add_argument("--mode", type=str, default="mock", choices=["mock", "real"])
     parser.add_argument("--timeout-seconds", type=int, default=120)
+    parser.add_argument(
+        "--workspace-project-root",
+        type=str,
+        default="",
+        help="目标 Git 仓库根目录（留空默认当前 project-root）",
+    )
+    parser.add_argument(
+        "--git-scope-path",
+        type=str,
+        default="book-manage/",
+        help="本轮实现与提交的作用域路径（仓库内相对路径）",
+    )
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
@@ -35,6 +47,8 @@ def main() -> int:
         mode=args.mode,
         max_rounds=8,
         max_rounds_per_window=2,
+        workspace_project_root=args.workspace_project_root or None,
+        git_scope_path=args.git_scope_path or None,
     )
     print(f"run_id={run_id}")
 

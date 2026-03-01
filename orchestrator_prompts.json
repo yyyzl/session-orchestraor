@@ -1,0 +1,22 @@
+{
+  "defaults": {
+    "git_scope_path": "book-manage/"
+  },
+  "prompts": {
+    "implementation": "在目录 {scope_path} 下完成任务：{task_prompt}\n约束：所有新增或修改文件必须位于 {scope_path}；不要改动其他业务目录。",
+    "git_commit": "请你直接执行 git 提交，不要只给命令建议。\n硬性要求：\n1) 仅提交 {scope_path} 下变更，不要提交其他目录。\n2) 先执行 git add {git_add_target}。\n3) 执行 git commit，message 必须使用：{commit_message}。\n4) 提交后执行 git rev-parse --short HEAD 与 git show --name-only --pretty=format:%H%n%s -1。\n5) 在最终输出中给出 COMMIT_ID=<hash> 与 COMMIT_MESSAGE=<message>。\n6) 如果 {scope_path} 无可提交变更，返回 FAIL_NO_CHANGES。"
+  },
+  "prompt_overrides": {
+    "dev": {
+      "git_commit": "请你直接执行 git 提交，不要只给命令建议。\n硬性要求：\n1) 仅提交 {scope_path} 下变更，不要提交其他目录。\n2) 先执行 git add {git_add_target}。\n3) 执行 git commit，message 必须使用：{commit_message}。\n4) 提交后执行 git rev-parse --short HEAD 与 git show --name-only --pretty=format:%H%n%s -1。\n5) 在最终输出中给出 COMMIT_ID=<hash> 与 COMMIT_MESSAGE=<message>。\n6) 如果 {scope_path} 无可提交变更，返回 FAIL_NO_CHANGES。"
+    },
+    "planning": {
+      "git_commit": "请你直接执行 git 提交，不要只给命令建议。\n规则：\n1) 优先提交 {scope_path} 下变更。\n2) 先执行 git add {git_add_target}。\n3) 若无变更必须执行空提交：git commit --allow-empty -m \"{commit_message}\"。\n4) 在最终输出中给出 COMMIT_ID=<hash> 与 COMMIT_MESSAGE=<message>。"
+    }
+  },
+  "commit_message_by_task_type": {
+    "dev": "feat(book-manage): 产出本轮前端页面。",
+    "planning": "chore(planning): 记录本轮规划会话。",
+    "default": "chore(orchestrator): 完成本轮会话编排步骤。"
+  }
+}

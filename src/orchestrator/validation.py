@@ -43,6 +43,8 @@ def validate_run_consistency(*, runtime_root: Path, run_id: str) -> Dict[str, An
                 "mode",
                 "model_id",
                 "reasoning_level",
+                "workspace_project_root",
+                "git_scope_path",
                 "updated_at",
             )
         ),
