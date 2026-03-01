@@ -14,6 +14,9 @@ from .models import RunnerStepResult
 from .runners import MockRunner, RealRunner
 from .storage import RuntimeStore
 
+_WINDOW_SWITCH_COMMAND = "/new"
+_WINDOW_SWITCH_SEMANTICS = "new_thread_same_process"
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -80,6 +83,29 @@ def _deep_merge_dict(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, A
         else:
             merged[key] = value
     return merged
+
+
+def _resolve_prompt_template(
+    *,
+    prompt_config: Dict[str, Any],
+    task_type: str,
+    prompt_key: str,
+    default_template: str,
+) -> tuple[str, str]:
+    overrides = prompt_config.get("prompt_overrides", {})
+    task_overrides = overrides.get(task_type, {}) if isinstance(overrides, dict) else {}
+    if isinstance(task_overrides, dict) and prompt_key in task_overrides:
+        candidate = str(task_overrides.get(prompt_key) or "")
+        if candidate:
+            return candidate, f"prompt_overrides.{task_type}.{prompt_key}"
+
+    prompts = prompt_config.get("prompts", {})
+    if isinstance(prompts, dict) and prompt_key in prompts:
+        candidate = str(prompts.get(prompt_key) or "")
+        if candidate:
+            return candidate, f"prompts.{prompt_key}"
+
+    return str(default_template), f"defaults.{prompt_key}"
 
 
 _DEFAULT_PROMPT_CONFIG: Dict[str, Any] = {
@@ -166,14 +192,15 @@ def _build_scoped_task_prompt(
     template_variables: Dict[str, str],
 ) -> str:
     normalized_task = (task_prompt or "").strip() or "完成当前需求"
-    prompts = prompt_config.get("prompts", {})
-    overrides = prompt_config.get("prompt_overrides", {}).get(task_type, {})
-    template = str(overrides.get("implementation") or prompts.get("implementation") or "")
-    if not template:
-        template = (
+    template, _ = _resolve_prompt_template(
+        prompt_config=prompt_config,
+        task_type=task_type,
+        prompt_key="implementation",
+        default_template=(
             "在目录 {scope_path} 下完成任务：{task_prompt}\n"
             "约束：所有新增或修改文件必须位于 {scope_path}；不要改动其他业务目录。"
-        )
+        ),
+    )
 
     variables = dict(template_variables)
     variables.update(
@@ -192,15 +219,13 @@ def _build_git_commit_command(
     scope_path: str,
     prompt_config: Dict[str, Any],
     template_variables: Dict[str, str],
-) -> str:
-    if mode != "real":
-        return "git提交"
-
-    prompts = prompt_config.get("prompts", {})
-    overrides = prompt_config.get("prompt_overrides", {}).get(task_type, {})
-    template = str(overrides.get("git_commit") or prompts.get("git_commit") or "")
-    if not template:
-        template = _DEFAULT_PROMPT_CONFIG["prompts"]["git_commit"]
+) -> tuple[str, Dict[str, str]]:
+    template, template_source = _resolve_prompt_template(
+        prompt_config=prompt_config,
+        task_type=task_type,
+        prompt_key="git_commit",
+        default_template=_DEFAULT_PROMPT_CONFIG["prompts"]["git_commit"],
+    )
 
     commit_message_cfg = prompt_config.get("commit_message_by_task_type", {})
     commit_message = str(
@@ -217,7 +242,13 @@ def _build_git_commit_command(
             "commit_message": commit_message,
         }
     )
-    return _render_template(template, variables)
+    rendered_command = _render_template(template, variables)
+    if mode != "real":
+        rendered_command = "git提交"
+    return rendered_command, {
+        "prompt_template_key": "git_commit",
+        "prompt_template_source": template_source,
+    }
 
 
 def _build_workflow_steps(
@@ -228,13 +259,21 @@ def _build_workflow_steps(
     scope_path: str,
     prompt_config: Dict[str, Any],
     template_variables: Dict[str, str],
-) -> list[Dict[str, str]]:
+) -> list[Dict[str, Any]]:
     if task_type != "dev":
         return []
 
     track = _infer_dev_track(task_prompt)
     before_step = "$before-backend-dev" if track == "backend" else "$before-frontend-dev"
     check_step = "$check-backend" if track == "backend" else "$check-frontend"
+
+    git_command, git_meta = _build_git_commit_command(
+        mode=mode,
+        task_type=task_type,
+        scope_path=scope_path,
+        prompt_config=prompt_config,
+        template_variables=template_variables,
+    )
 
     return [
         {"name": "$start", "command": "$start"},
@@ -253,13 +292,8 @@ def _build_workflow_steps(
         {"name": "$finish-work", "command": "$finish-work"},
         {
             "name": "git提交",
-            "command": _build_git_commit_command(
-                mode=mode,
-                task_type=task_type,
-                scope_path=scope_path,
-                prompt_config=prompt_config,
-                template_variables=template_variables,
-            ),
+            "command": git_command,
+            "meta": git_meta,
         },
         {"name": "$record-session", "command": "$record-session"},
     ]
@@ -288,10 +322,12 @@ class _RunContext:
     stop_requested: bool = False
     thread: Optional[threading.Thread] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
-    workflow_steps: list[Dict[str, str]] = field(default_factory=list)
+    workflow_steps: list[Dict[str, Any]] = field(default_factory=list)
     workflow_step_index: int = 0
     workflow_step_attempt: int = 0
     step_max_retry: int = 1
+    dev_unfinished_threshold_n: int = 1
+    dev_unfinished_streak: int = 0
     task_done_signal: bool = False
     last_commit_id: str = ""
     last_commit_message: str = ""
@@ -332,6 +368,7 @@ class SessionOrchestrator:
         step_delay_seconds: float = 0.0,
         codex_bin: Optional[str] = None,
         step_max_retry: int = 1,
+        dev_unfinished_threshold_n: int = 1,
         workspace_project_root: Optional[str] = None,
         git_scope_path: Optional[str] = None,
         prompt_config_path: Optional[str] = None,
@@ -342,6 +379,8 @@ class SessionOrchestrator:
             raise ValueError("max_rounds_per_window 必须大于 0")
         if step_max_retry < 0:
             raise ValueError("step_max_retry 必须大于等于 0")
+        if dev_unfinished_threshold_n <= 0:
+            raise ValueError("dev_unfinished_threshold_n 必须大于 0")
         if mode not in self.runner_factory_map:
             raise ValueError(f"不支持的 mode: {mode}")
 
@@ -391,6 +430,9 @@ class SessionOrchestrator:
             "current_workflow_step_index": 0,
             "current_workflow_step_attempt": 0,
             "current_workflow_step_status": "pending" if workflow_steps else "",
+            "dev_unfinished_threshold_n": dev_unfinished_threshold_n,
+            "window_switch_command": _WINDOW_SWITCH_COMMAND,
+            "window_switch_semantics": _WINDOW_SWITCH_SEMANTICS,
             "updated_at": _utc_now(),
         }
         self.store.save_snapshot(snapshot)
@@ -414,6 +456,7 @@ class SessionOrchestrator:
             snapshot=snapshot,
             workflow_steps=workflow_steps,
             step_max_retry=step_max_retry,
+            dev_unfinished_threshold_n=dev_unfinished_threshold_n,
         )
         worker = threading.Thread(target=self._run_loop, args=(ctx,), daemon=True)
         ctx.thread = worker
@@ -549,6 +592,8 @@ class SessionOrchestrator:
                         "step_name": step_name,
                         "step_attempt": step_attempt,
                     }
+                    if self._uses_fixed_workflow(ctx):
+                        step_meta.update(dict(step.get("meta") or {}))
                     self._append_event(
                         ctx,
                         event_type="step_started",
@@ -637,6 +682,14 @@ class SessionOrchestrator:
                             self._advance_workflow_step(ctx)
                             if self._workflow_finished(ctx):
                                 if ctx.task_done_signal:
+                                    self._append_policy_decision(
+                                        ctx,
+                                        step_name=step_name,
+                                        decision_basis="workflow_completed_and_task_done",
+                                        decision_result="continue_same_window",
+                                        action="mark_completed",
+                                        reason="task_done",
+                                    )
                                     self._append_event(
                                         ctx,
                                         event_type="window_closed",
@@ -645,16 +698,58 @@ class SessionOrchestrator:
                                         operator_id="",
                                         meta={"reason": "completed"},
                                     )
+                                    self._reset_unfinished_streak(ctx)
                                     self._update_status(ctx, "completed")
                                     break
-                                switched = self._start_new_window(ctx, reason="workflow_completed")
-                                if not switched:
-                                    self._update_status(ctx, "failed")
-                                    break
+
+                                switch_required, threshold_meta = self._mark_unfinished_round(ctx)
+                                if switch_required:
+                                    self._append_policy_decision(
+                                        ctx,
+                                        step_name=step_name,
+                                        decision_basis="workflow_completed_but_task_unfinished",
+                                        decision_result="start_new_window",
+                                        action="start_new_window",
+                                        reason="unfinished_threshold_reached",
+                                        extra=threshold_meta,
+                                    )
+                                    switched = self._start_new_window(ctx, reason="workflow_completed")
+                                    if not switched:
+                                        self._update_status(ctx, "failed")
+                                        break
+                                    continue
+
+                                self._append_policy_decision(
+                                    ctx,
+                                    step_name=step_name,
+                                    decision_basis="workflow_completed_but_task_unfinished",
+                                    decision_result="continue_same_window",
+                                    action="continue_same_window",
+                                    reason="unfinished_threshold_not_reached",
+                                    extra=threshold_meta,
+                                )
+                                self._restart_workflow_in_same_window(ctx)
                                 continue
+
+                            self._append_policy_decision(
+                                ctx,
+                                step_name=step_name,
+                                decision_basis="step_passed",
+                                decision_result="continue_same_window",
+                                action="continue_same_window",
+                                reason="next_required_step",
+                            )
                             continue
 
                         if result.done:
+                            self._append_policy_decision(
+                                ctx,
+                                step_name=step_name,
+                                decision_basis="step_passed_and_task_done",
+                                decision_result="continue_same_window",
+                                action="mark_completed",
+                                reason="task_done",
+                            )
                             self._append_event(
                                 ctx,
                                 event_type="window_closed",
@@ -665,6 +760,15 @@ class SessionOrchestrator:
                             )
                             self._update_status(ctx, "completed")
                             break
+
+                        self._append_policy_decision(
+                            ctx,
+                            step_name=step_name,
+                            decision_basis="step_passed",
+                            decision_result="continue_same_window",
+                            action="continue_same_window",
+                            reason="next_round",
+                        )
                         current_command = result.next_command_text or current_command
                     else:
                         if self._uses_fixed_workflow(ctx) and ctx.workflow_step_attempt < ctx.step_max_retry:
@@ -684,20 +788,26 @@ class SessionOrchestrator:
                                     "failure_code": step_meta.get("failure_code", ""),
                                 },
                             )
+                            self._append_policy_decision(
+                                ctx,
+                                step_name=step_name,
+                                decision_basis="step_failed_retry_available",
+                                decision_result="continue_same_window",
+                                action="retry_current_step",
+                                reason="retry_current_step",
+                                extra={"failure_code": step_meta.get("failure_code", "")},
+                            )
                             continue
 
                         if self._uses_fixed_workflow(ctx):
-                            self._append_event(
+                            self._append_policy_decision(
                                 ctx,
-                                event_type="policy_decision",
-                                command_text=current_command,
-                                model_output_text="",
-                                operator_id="",
-                                meta={
-                                    "action": "start_new_window",
-                                    "reason": "retry_exhausted",
-                                    "step_name": step_name,
-                                },
+                                step_name=step_name,
+                                decision_basis="step_failed_retry_exhausted",
+                                decision_result="start_new_window",
+                                action="start_new_window",
+                                reason="retry_exhausted",
+                                extra={"failure_code": step_meta.get("failure_code", "")},
                             )
                             switched = self._start_new_window(ctx, reason="retry_exhausted")
                             if not switched:
@@ -705,6 +815,15 @@ class SessionOrchestrator:
                                 break
                             continue
 
+                        self._append_policy_decision(
+                            ctx,
+                            step_name=step_name,
+                            decision_basis="step_failed_without_fixed_workflow",
+                            decision_result="continue_same_window",
+                            action="mark_failed",
+                            reason="fatal_failure",
+                            extra={"failure_code": step_meta.get("failure_code", "")},
+                        )
                         self._update_status(ctx, "failed")
                         break
             else:
@@ -736,7 +855,7 @@ class SessionOrchestrator:
     def _uses_fixed_workflow(self, ctx: _RunContext) -> bool:
         return bool(ctx.workflow_steps)
 
-    def _current_workflow_step(self, ctx: _RunContext) -> Dict[str, str]:
+    def _current_workflow_step(self, ctx: _RunContext) -> Dict[str, Any]:
         return ctx.workflow_steps[ctx.workflow_step_index]
 
     def _advance_workflow_step(self, ctx: _RunContext) -> None:
@@ -751,6 +870,68 @@ class SessionOrchestrator:
 
     def _workflow_finished(self, ctx: _RunContext) -> bool:
         return ctx.workflow_step_index >= len(ctx.workflow_steps)
+
+    def _restart_workflow_in_same_window(self, ctx: _RunContext) -> None:
+        if not ctx.workflow_steps:
+            return
+        ctx.workflow_step_index = 0
+        ctx.workflow_step_attempt = 0
+        ctx.snapshot["current_workflow_step"] = ctx.workflow_steps[0]["name"]
+        ctx.snapshot["current_workflow_step_index"] = 0
+        ctx.snapshot["current_workflow_step_attempt"] = 0
+        ctx.snapshot["current_workflow_step_status"] = "pending"
+        self._persist_snapshot(ctx)
+
+    def _mark_unfinished_round(self, ctx: _RunContext) -> tuple[bool, Dict[str, Any]]:
+        threshold = max(1, int(ctx.dev_unfinished_threshold_n))
+        if ctx.task_type != "dev":
+            return True, {"unfinished_streak": 0, "unfinished_threshold_n": threshold}
+
+        ctx.dev_unfinished_streak += 1
+        reached = ctx.dev_unfinished_streak >= threshold
+        return reached, {
+            "unfinished_streak": ctx.dev_unfinished_streak,
+            "unfinished_threshold_n": threshold,
+        }
+
+    def _reset_unfinished_streak(self, ctx: _RunContext) -> None:
+        ctx.dev_unfinished_streak = 0
+
+    def _append_policy_decision(
+        self,
+        ctx: _RunContext,
+        *,
+        step_name: str,
+        decision_basis: str,
+        decision_result: str,
+        action: str,
+        reason: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        meta: Dict[str, Any] = {
+            "step_name": step_name,
+            "decision_basis": decision_basis,
+            "decision_result": decision_result,
+            "action": action,
+            "reason": reason,
+            "task_type": ctx.task_type,
+            "window_index": int(ctx.snapshot.get("current_window_index", 0) or 0),
+            "round_index_in_window": int(ctx.snapshot.get("current_round_index_in_window", 0) or 0),
+            "global_round_index": int(ctx.snapshot.get("current_global_round_index", 0) or 0),
+        }
+        if decision_result == "start_new_window" or action == "start_new_window":
+            meta["window_switch_command"] = _WINDOW_SWITCH_COMMAND
+            meta["window_switch_semantics"] = _WINDOW_SWITCH_SEMANTICS
+        if extra:
+            meta.update(extra)
+        self._append_event(
+            ctx,
+            event_type="policy_decision",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta=meta,
+        )
 
     def _start_new_window(self, ctx: _RunContext, *, reason: str) -> bool:
         handoff = self._build_handoff(ctx)
@@ -776,14 +957,6 @@ class SessionOrchestrator:
             model_output_text="",
             operator_id="",
             meta={"handoff": handoff},
-        )
-        self._append_event(
-            ctx,
-            event_type="policy_decision",
-            command_text="",
-            model_output_text="",
-            operator_id="",
-            meta={"action": "start_new_window", "reason": reason},
         )
         self._append_event(
             ctx,
@@ -816,6 +989,7 @@ class SessionOrchestrator:
             operator_id="",
             meta={"handoff": handoff},
         )
+        self._reset_unfinished_streak(ctx)
         return True
 
     def _refresh_workflow_steps_for_current_window(self, ctx: _RunContext) -> None:

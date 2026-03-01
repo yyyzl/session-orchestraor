@@ -727,6 +727,122 @@ class WorkflowControlTests(unittest.TestCase):
             combined_text = "\n".join(str(e.get("model_output_text") or "") for e in git_step_output)
             self.assertIn("COMMIT_ID=", combined_text)
 
+    def test_snapshot_has_default_dev_unfinished_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-threshold-default",
+                task_prompt="实现 book-manage 页面",
+                task_type="dev",
+                mode="mock",
+                max_rounds=12,
+                max_rounds_per_window=12,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+            self.assertEqual(int(snapshot.get("dev_unfinished_threshold_n", 0)), 1)
+
+    def test_each_round_records_policy_basis_result_and_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-policy-each-round",
+                task_prompt="实现 book-manage 页面",
+                task_type="dev",
+                mode="mock",
+                max_rounds=12,
+                max_rounds_per_window=12,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            step_finished = [e for e in events if e.get("event_type") == "step_finished"]
+            policy_events = [e for e in events if e.get("event_type") == "policy_decision"]
+            self.assertGreaterEqual(len(policy_events), len(step_finished))
+            self.assertGreater(len(policy_events), 0)
+            for event in policy_events:
+                meta = dict(event.get("meta", {}))
+                self.assertTrue(str(meta.get("decision_basis", "")).strip())
+                self.assertTrue(str(meta.get("decision_result", "")).strip())
+                self.assertTrue(str(meta.get("action", "")).strip())
+
+    def test_start_new_window_policy_exposes_new_thread_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _HandoffReadyRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-new-window-semantics",
+                task_prompt="实现并继续下一窗口",
+                task_type="dev",
+                mode="mock",
+                max_rounds=8,
+                max_rounds_per_window=8,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            decisions = [
+                e
+                for e in events
+                if e.get("event_type") == "policy_decision"
+                and e.get("meta", {}).get("action") == "start_new_window"
+            ]
+            self.assertGreaterEqual(len(decisions), 1)
+            latest_meta = dict(decisions[-1].get("meta", {}))
+            self.assertEqual(latest_meta.get("window_switch_command"), "/new")
+            self.assertEqual(latest_meta.get("window_switch_semantics"), "new_thread_same_process")
+
+    def test_git_commit_step_records_prompt_template_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _HappyWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="t-git-template-source",
+                task_prompt="实现 book-manage 页面",
+                task_type="dev",
+                mode="mock",
+                max_rounds=12,
+                max_rounds_per_window=12,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            git_step_started = [
+                e
+                for e in events
+                if e.get("event_type") == "step_started"
+                and e.get("meta", {}).get("step_name") == "git提交"
+            ]
+            self.assertGreaterEqual(len(git_step_started), 1)
+            meta = dict(git_step_started[0].get("meta", {}))
+            self.assertEqual(meta.get("prompt_template_key"), "git_commit")
+            self.assertTrue(str(meta.get("prompt_template_source", "")).strip())
+
 
 if __name__ == "__main__":
     unittest.main()

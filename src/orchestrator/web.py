@@ -130,6 +130,7 @@ class SessionOrchestratorHttpServer:
                             max_rounds_per_window=int(body.get("max_rounds_per_window") or 3),
                             step_delay_seconds=float(body.get("step_delay_seconds") or 0.0),
                             step_max_retry=int(body.get("step_max_retry") or 1),
+                            dev_unfinished_threshold_n=int(body.get("dev_unfinished_threshold_n") or 1),
                             codex_bin=body.get("codex_bin"),
                             workspace_project_root=body.get("workspace_project_root"),
                             git_scope_path=body.get("git_scope_path"),
