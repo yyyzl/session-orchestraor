@@ -54,5 +54,20 @@
   ".agents\\skills\\onboard\\SKILL.md": "1808f578d21eae3cbcf650d6aa4cf35ac42bf466df740b830593c9bda212d51a",
   ".agents\\skills\\record-session\\SKILL.md": "20ce670faf42067e9851f95629e7c83163d98780c6a7347886613550a90d47ae",
   ".agents\\skills\\start\\SKILL.md": "6ab8be66e77e5b13845bcf0610df8c12cebca1dc802f2f5d47562177be991ffb",
-  ".agents\\skills\\update-spec\\SKILL.md": "e014294d9ce1d40fc3b6c76074fa75c5c48d57b6a876cc8fd1ba1dc3111b1d90"
+  ".agents\\skills\\update-spec\\SKILL.md": "e014294d9ce1d40fc3b6c76074fa75c5c48d57b6a876cc8fd1ba1dc3111b1d90",
+  ".trellis/scripts/common/config.py": "909257b442d7d1e7a2596996622c4f2f010d8c1343e1efd088ef8615d99554c7",
+  ".trellis/config.yaml": "fe1fba0961e589c6f49190f5e19d4edb0d5bf894dba8468f06882c6e1c5e2aa1",
+  ".trellis/scripts/common/__init__.py": "301724230abcce6e9fc99054c12d21c30eea7bc3b330ae6350aa3b6158461273",
+  ".trellis/scripts/common/git_context.py": "f154d358c858f7bcfc21a03c9b909af3a8dfa20be37b2c5012d84b8e0588b493",
+  ".trellis/scripts/common/worktree.py": "434880e02dfa2e92f0c717ed2a28e4cdee681ea10c329a2438d533bdbc612408",
+  ".trellis/scripts/common/task_queue.py": "6de22c7731465ee52d2b5cd4853b191d3cf869bf259fbc93079b426ba1c3756c",
+  ".trellis/scripts/common/cli_adapter.py": "66ef4f75470807b531490a6b6928604eb59781148fe3c5412f39e132ffab0850",
+  ".trellis/scripts/multi_agent/start.py": "32ed1a13405b7c71881b2507a79e1a3733bc3fcedbc92fcee0d733ce00d759d0",
+  ".trellis/scripts/multi_agent/plan.py": "242b870b7667f730c910d629f16d44d5d3fd0a58f6451d9003c175fb2e77cee5",
+  ".trellis/scripts/task.py": "ecf52885a698dc93af67fd693825a2f71163ab86b5c2abe76d8aa2e2caa44372",
+  ".trellis/scripts/add_session.py": "7c869be8146e6f675bd95e424909ff301ea0a8f8fd82a4f056f6d320e755a406",
+  ".trellis/scripts/create_bootstrap.py": "aa5dd1f39a77b2f4bb827fd14ce7a83fb51870e77f556fe508afce3f8eac0b4e",
+  ".agents/skills/brainstorm/SKILL.md": "0cabc8e663a871dee6c8bbf7f149fe10f83f39835e66ad0a8d0867049aacb6f8",
+  ".agents/skills/record-session/SKILL.md": "ce27e953630a71ef989c5582790e9c8a600a2614ec668b674816c1daac73ce0a",
+  ".agents/skills/start/SKILL.md": "788e517f9e57c4ce68497c1cefabd51faa8253c681be7965915f21e6de9c5886"
 }
