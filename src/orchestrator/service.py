@@ -192,6 +192,14 @@ def _build_scoped_task_prompt(
     template_variables: Dict[str, str],
 ) -> str:
     normalized_task = (task_prompt or "").strip() or "完成当前需求"
+    if scope_path and not scope_path.endswith("/"):
+        # 作用域是单文件时，避免“在目录 xxx 下”这类歧义表述。
+        scope_label = _scope_label(scope_path)
+        return (
+            f"在路径 {scope_label} 内完成任务：{normalized_task}\n"
+            f"约束：所有新增或修改文件必须位于 {scope_label}；不要改动其他业务目录。"
+        )
+
     template, _ = _resolve_prompt_template(
         prompt_config=prompt_config,
         task_type=task_type,
@@ -1285,7 +1293,12 @@ class SessionOrchestrator:
             return result
 
         output_text = str(result.model_output_text or "")
-        if "FAIL_NO_CHANGES" in output_text:
+        meta = dict(result.meta or {})
+        failure_code = str(meta.get("failure_code") or "").strip()
+        explicit_fail_no_changes = failure_code == "FAIL_NO_CHANGES" or bool(
+            re.search(r"(?m)^\s*FAIL_NO_CHANGES(?:\s*[:：].*)?\s*$", output_text)
+        )
+        if explicit_fail_no_changes:
             return RunnerStepResult(
                 model_output_text=output_text,
                 next_command_text=result.next_command_text,

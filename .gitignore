@@ -12,3 +12,5 @@ __pycache__/
 build/
 dist/
 node_modules/
+.server_*.log
+.server_*.err.log

@@ -3,72 +3,90 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Session Orchestrator</title>
+  <title>Session Orchestrator Chat</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <main class="app-shell">
-    <header class="hero">
-      <h1>Session Orchestrator</h1>
-      <p>会话式运行追踪：每一轮输入、输出、状态都实时可见</p>
-    </header>
+  <main class="layout">
+    <aside class="sidebar" aria-label="会话配置面板">
+      <header class="sidebar-head">
+        <h1>Orchestrator Chat</h1>
+        <p>像聊天机器人一样驱动目录内开发</p>
+      </header>
 
-    <section id="setup-view" class="setup-view">
-      <article class="setup-card">
-        <h2>启动任务</h2>
-        <form id="start-form" class="setup-form">
-          <label for="task-id">任务ID</label>
-          <input id="task-id" value="book-manage-mvp" required>
-
-          <label for="workspace-project-root">目标仓库路径</label>
-          <input id="workspace-project-root" placeholder="留空=当前编排器仓库">
-
-          <label for="git-scope-path">作用域路径</label>
-          <input id="git-scope-path" value="book-manage/" placeholder="例如：book-manage/ 或 apps/web/">
-
-          <label for="mode">模式</label>
-          <select id="mode">
-            <option value="mock">mock</option>
-            <option value="real">real</option>
-          </select>
-
-          <label for="task-prompt">任务提示词</label>
-          <textarea id="task-prompt" rows="4">实现 book-manage 前端（查看/新增/删除），并完成 localStorage 持久化。</textarea>
-          <button type="submit">启动运行</button>
-        </form>
-      </article>
-    </section>
-
-    <section id="chat-view" class="chat-view is-hidden">
-      <aside class="session-panel">
-        <h2>会话状态</h2>
+      <section class="panel status-panel" aria-label="运行状态">
+        <h2>运行状态</h2>
         <p id="run-id-line" class="run-id-line">run_id: -</p>
-        <ul class="session-meta">
-          <li><span>执行状态</span><strong id="status">-</strong></li>
-          <li><span>当前窗口</span><strong id="window">-</strong></li>
-          <li><span>窗口轮次</span><strong id="round">-</strong></li>
-          <li><span>当前步骤</span><strong id="step">-</strong></li>
+        <ul class="status-list">
+          <li><span>状态</span><strong id="status">idle</strong></li>
+          <li><span>窗口</span><strong id="window">-</strong></li>
+          <li><span>轮次</span><strong id="round">-</strong></li>
+          <li><span>步骤</span><strong id="step">-</strong></li>
         </ul>
-        <div class="session-actions">
-          <button id="report-btn" type="button">生成运行报告</button>
-          <button id="restart-btn" type="button" class="ghost">新建运行</button>
-        </div>
-        <pre id="report-box" class="report-box"></pre>
-      </aside>
-
-      <section class="chat-main" aria-label="运行日志会话区">
-        <div id="conversation" class="conversation" aria-live="polite"></div>
-        <form id="operator-form" class="composer">
-          <input id="operator-id" value="human" placeholder="operator_id">
-          <input id="operator-text" placeholder="输入人工消息并中断当前运行">
-          <button type="submit">发送</button>
-        </form>
       </section>
-    </section>
 
-    <p id="global-alert" class="global-alert" role="alert" aria-live="assertive"></p>
+      <section class="panel" aria-label="会话参数">
+        <h2>会话参数</h2>
+
+        <label for="task-id">任务 ID</label>
+        <input id="task-id" value="book-manage-chat">
+
+        <label for="workspace-project-root">目标目录</label>
+        <input id="workspace-project-root" placeholder="例如：G:\\my-project（需是 Git 仓库）">
+
+        <label for="git-scope-path">作用域路径</label>
+        <input id="git-scope-path" value="book-manage/" placeholder="例如：book-manage/ 或 apps/web/">
+
+        <label for="mode">模式</label>
+        <select id="mode">
+          <option value="mock">mock</option>
+          <option value="real">real</option>
+        </select>
+
+        <label for="operator-id">操作人 ID</label>
+        <input id="operator-id" value="human">
+
+        <div class="actions">
+          <button id="restart-btn" type="button">新建会话</button>
+          <button id="report-btn" type="button" class="ghost">导出报告</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="运行报告">
+        <h2>运行报告</h2>
+        <pre id="report-box" class="report-box"></pre>
+      </section>
+    </aside>
+
+    <section class="chat-shell" aria-label="聊天区">
+      <header class="chat-head">
+        <div>
+          <h2>会话机器人</h2>
+          <p>首条消息会启动任务，后续消息会插入当前运行。</p>
+        </div>
+        <strong id="status-badge" class="status-badge">IDLE</strong>
+      </header>
+
+      <div id="conversation" class="conversation" aria-live="polite"></div>
+
+      <form id="chat-form" class="composer">
+        <textarea
+          id="chat-input"
+          rows="3"
+          placeholder="输入你的开发需求，例如：在当前目录实现一个登录页并补齐接口校验"
+          required
+        ></textarea>
+        <div class="composer-foot">
+          <span id="composer-hint" class="composer-hint">Enter 发送，Shift+Enter 换行</span>
+          <button id="send-btn" type="submit">发送</button>
+        </div>
+      </form>
+    </section>
   </main>
+
+  <p id="global-alert" class="global-alert" role="alert" aria-live="assertive"></p>
+
   <script src="./app.js"></script>
 </body>
 </html>

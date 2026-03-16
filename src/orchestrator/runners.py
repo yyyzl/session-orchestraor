@@ -512,9 +512,15 @@ class RealRunner(BaseRunner):
         self.selected_model_id: Optional[str] = None
 
     def start(self) -> None:
-        self.client = self.client_factory(
-            command=[resolve_codex_binary(self.codex_bin), "app-server", "--listen", "stdio://"]
-        )
+        client_kwargs = {
+            "command": [resolve_codex_binary(self.codex_bin), "app-server", "--listen", "stdio://"],
+            "cwd": str(self.project_root),
+        }
+        try:
+            self.client = self.client_factory(**client_kwargs)
+        except TypeError:
+            # 兼容不接受 cwd 参数的自定义 client_factory。
+            self.client = self.client_factory(command=client_kwargs["command"])
         self.client.start()
         self.client.request(
             "initialize",

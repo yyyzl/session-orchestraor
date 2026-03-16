@@ -1,39 +1,33 @@
-# Frontend Development Guidelines
+# Frontend 开发规范
 
-> Best practices for frontend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
+> 面向原生 HTML/CSS/JS 页面与编排控制台前端实现的约定。
 
 ---
 
-## Guidelines Index
+## 适用范围
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
-| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
-| [State Management](./state-management.md) | Local state, global state, server state | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+- 编排控制台前端：`src/frontend/index.html`、`src/frontend/app.js`、`src/frontend/styles.css`
+- 业务示例页面：`book-manage/index.html`、`book-manage/app.js`、`book-manage/styles.css`
+- 前端相关测试：`tests/test_web_static_mount.py`、`tests/test_mock_runner_counter_page.py`
 
 ---
 
-## How to Fill These Guidelines
+## 规范索引
 
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
+| 文档 | 说明 | 状态 |
+|---|---|---|
+| [Directory Structure](./directory-structure.md) | 前端目录划分与命名约定 | 已完成 |
+| [Component Guidelines](./component-guidelines.md) | DOM 组件化组织、样式与可访问性 | 已完成 |
+| [Hook Guidelines](./hook-guidelines.md) | 无框架场景下的状态逻辑复用约定 | 已完成 |
+| [State Management](./state-management.md) | 会话态、本地持久态、服务端态管理 | 已完成 |
+| [Type Safety](./type-safety.md) | 当前 JS 项目的类型安全边界与演进 | 已完成 |
+| [Quality Guidelines](./quality-guidelines.md) | 代码质量、测试与评审清单 | 已完成 |
 
 ---
 
-**Language**: All documentation should be written in **English**.
+## 快速原则
+
+1. 页面状态集中在 `state` 对象，DOM 引用集中在 `els`。
+2. 与后端交互统一走 `request()`，错误统一抛出并提示。
+3. 事件驱动更新 UI：收到事件后只更新受影响节点。
+4. 业务页面优先小函数拆分，避免全局散落逻辑。

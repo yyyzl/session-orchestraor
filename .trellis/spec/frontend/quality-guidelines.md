@@ -1,51 +1,56 @@
 # Quality Guidelines
 
-> Code quality standards for frontend development.
+> 前端质量目标：交互可用、状态一致、错误可见、改动可测。
 
 ---
 
 ## Overview
 
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
+- 逻辑与视图职责清晰：请求、状态、渲染、事件绑定分段。
+- 任何异步失败必须可感知（告警区或系统事件）。
+- 页面改动需保证与后端接口契约一致。
 
 ---
 
 ## Forbidden Patterns
 
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
+- 禁止未转义文本直接进入 `innerHTML`。
+- 禁止在事件回调中重复绑定监听器（内存泄漏/重复触发）。
+- 禁止轮询不清理定时器。
+- 禁止把后端错误吞掉仅打印控制台。
 
 ---
 
 ## Required Patterns
 
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
+- 统一请求入口：通过 `request()` 处理 HTTP 与错误。
+- 统一状态入口：通过 `renderSnapshot()` 更新状态展示。
+- 关键按钮行为需含前置校验（如 run 未启动时禁止发送消息）。
+- 终态必须停止轮询并追加结束提示。
 
 ---
 
 ## Testing Requirements
 
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
+- 至少覆盖：
+  - 静态页面挂载与路由回退；
+  - mock 生成页面关键元素与交互逻辑；
+  - 编排主流程回归（含策略分支）。
+- UI 结构变化至少保证测试中的关键断言仍可通过。
 
 ---
 
 ## Code Review Checklist
 
-<!-- What reviewers should check -->
+- 是否引入了新的全局可变状态；若有是否必要且可重置。
+- 是否确保所有用户可见文本来源安全（转义/白名单）。
+- 是否校验了 run 状态机边界（未启动、运行中、终态）。
+- 是否补充或更新对应测试断言。
 
-(To be filled by the team)
+---
+
+## 真实示例
+
+- 统一请求与报错：`src/frontend/app.js`
+- 终态停轮询：`src/frontend/app.js`
+- 前端挂载测试：`tests/test_web_static_mount.py`

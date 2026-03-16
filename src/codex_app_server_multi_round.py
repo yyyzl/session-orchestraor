@@ -20,8 +20,9 @@ from typing import Any, Callable, Dict, List, Optional
 class JsonRpcAppServerClient:
     """最小可用 JSON-RPC 客户端，仅覆盖本任务需要的请求/通知。"""
 
-    def __init__(self, command: Optional[List[str]] = None) -> None:
+    def __init__(self, command: Optional[List[str]] = None, cwd: Optional[str] = None) -> None:
         self.command = command or [resolve_codex_binary(), "app-server", "--listen", "stdio://"]
+        self.cwd = cwd
         self.proc: Optional[subprocess.Popen[str]] = None
         self.msg_queue: Queue[Dict[str, Any]] = Queue()
         self.backlog: List[Dict[str, Any]] = []
@@ -30,6 +31,7 @@ class JsonRpcAppServerClient:
     def start(self) -> None:
         self.proc = subprocess.Popen(
             self.command,
+            cwd=self.cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
