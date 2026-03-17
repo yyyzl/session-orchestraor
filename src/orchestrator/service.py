@@ -258,7 +258,10 @@ def _append_work_item_context(
         extra_lines.append("验收点：")
         for idx, item in enumerate(normalized_acceptance, 1):
             extra_lines.append(f"- [{idx}] {item}")
-    extra_lines.append("约束：仅围绕当前 WorkItem 的验收点推进；禁止跨 WorkItem 混改。")
+        extra_lines.append("约束：仅围绕当前 WorkItem 的验收点推进；禁止跨 WorkItem 混改。")
+    else:
+        extra_lines.append("提示：当前 WorkItem 暂无验收点，建议先补齐 1-3 条可验证验收点。")
+        extra_lines.append("约束：仅围绕当前 WorkItem 标题/目标推进；禁止跨 WorkItem 混改。")
 
     base = (base_prompt or "").rstrip()
     return f"{base}\n\n" + "\n".join(extra_lines).rstrip()
@@ -541,7 +544,6 @@ class SessionOrchestrator:
             work_item = next((item for item in work_items if str(item.get("id", "")) == current_work_item_id), None)
             if work_item is None:
                 raise RuntimeError("初始化 work_items 失败：未找到 current_work_item_id 对应项")
-            workflow_prompt = str(work_item.get("title") or task_prompt)
             workflow_scope = str(work_item.get("scope_path") or resolved_scope)
         workflow_steps = _build_workflow_steps(
             task_type=task_type,
@@ -1435,7 +1437,8 @@ class SessionOrchestrator:
         if item is None:
             return ctx.git_scope_path, ctx.task_prompt, None
         scope_path = str(item.get("scope_path") or ctx.git_scope_path)
-        prompt = str(item.get("title") or ctx.task_prompt)
+        goal = str(ctx.task_prompt or ctx.snapshot.get("goal") or "").strip()
+        prompt = goal or str(item.get("title") or "").strip() or str(ctx.task_prompt or "")
         return scope_path, prompt, item
 
     def _mark_current_work_item_done(self, ctx: _RunContext) -> None:

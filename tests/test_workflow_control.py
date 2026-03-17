@@ -1051,6 +1051,48 @@ class WorkflowControlTests(unittest.TestCase):
             self.assertIn("git提交", commands)
             self.assertLess(commands.index("human_review"), commands.index("git提交"))
 
+    def test_work_items_implementation_prompt_keeps_goal_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _WorkItemWorkflowRunner},
+            )
+            task_prompt = "\n".join(
+                [
+                    "实现 book-manage 页面",
+                    "- 要求：显示列表",
+                    "- 要求：补齐测试",
+                ]
+            )
+            run_id = orchestrator.start_run(
+                task_id="wi-prompt-goal",
+                task_prompt=task_prompt,
+                task_type="dev",
+                workflow_mode="work_items",
+                mode="mock",
+                max_rounds=80,
+                max_rounds_per_window=80,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "paused")
+            self.assertEqual(snapshot.get("pause_reason"), "human_review")
+
+            events = orchestrator.get_events(run_id)
+            impl_steps = [
+                e
+                for e in events
+                if e.get("event_type") == "step_started"
+                and e.get("meta", {}).get("step_name") == "需求实现"
+            ]
+            self.assertGreaterEqual(len(impl_steps), 1)
+            impl_prompt = str(impl_steps[0].get("command_text") or "")
+            self.assertIn("要求：显示列表", impl_prompt)
+            self.assertIn("要求：补齐测试", impl_prompt)
+            self.assertNotIn("仅围绕当前 WorkItem 的验收点推进", impl_prompt)
+
     def test_human_review_reject_creates_fix_work_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

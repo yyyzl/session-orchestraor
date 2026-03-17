@@ -8,6 +8,8 @@
     currentWorkItemId: "",
     since: 0,
     pollingTimer: null,
+    pollingInFlight: false,
+    pollingQueued: false,
   };
 
   const terminalStatuses = new Set(["completed", "failed", "stopped"]);
@@ -393,42 +395,81 @@
   }
 
   async function pollOnce() {
-    if (!state.runId) {
+    const runId = state.runId;
+    if (!runId) {
       return;
     }
 
-    const snapshot = await request(`/api/runs/${state.runId}`);
-    renderSnapshot(snapshot);
-
-    if (toText(snapshot.workflow_mode) === "work_items") {
-      const workItemsPayload = await request(`/api/runs/${state.runId}/work-items`);
-      renderWorkItems(workItemsPayload);
-    } else {
-      clearWorkItemPanels();
+    if (state.pollingInFlight) {
+      state.pollingQueued = true;
+      return;
     }
 
-    const evResp = await request(`/api/runs/${state.runId}/events?since=${state.since}`);
-    const events = Array.isArray(evResp.events) ? evResp.events : [];
-    for (const event of events) {
-      renderEvent(event);
-    }
-    state.since = Number(evResp.next_since || state.since || 0);
+    state.pollingInFlight = true;
+    state.pollingQueued = false;
+    const since = state.since;
 
-    if (terminalStatuses.has(snapshot.status)) {
-      stopPolling();
-      appendMessage({
-        role: "system",
-        text: `运行结束：${snapshot.status}`,
-        time: snapshot.updated_at,
-      });
+    try {
+      const snapshot = await request(`/api/runs/${runId}`);
+      if (state.runId !== runId) {
+        return;
+      }
+      renderSnapshot(snapshot);
+
+      if (toText(snapshot.workflow_mode) === "work_items") {
+        const workItemsPayload = await request(`/api/runs/${runId}/work-items`);
+        if (state.runId !== runId) {
+          return;
+        }
+        renderWorkItems(workItemsPayload);
+      } else {
+        clearWorkItemPanels();
+      }
+
+      const evResp = await request(`/api/runs/${runId}/events?since=${since}`);
+      if (state.runId !== runId) {
+        return;
+      }
+      const events = Array.isArray(evResp.events) ? evResp.events : [];
+      for (const event of events) {
+        renderEvent(event);
+      }
+      state.since = Number(evResp.next_since || since || 0);
+
+      if (terminalStatuses.has(snapshot.status)) {
+        stopPolling();
+        appendMessage({
+          role: "system",
+          text: `运行结束：${snapshot.status}`,
+          time: snapshot.updated_at,
+        });
+      }
+    } finally {
+      if (state.runId === runId) {
+        state.pollingInFlight = false;
+        if (state.pollingQueued && state.pollingTimer !== null) {
+          state.pollingQueued = false;
+          window.setTimeout(() => {
+            if (state.pollingTimer === null || state.runId !== runId) {
+              return;
+            }
+            pollOnce().catch((error) => {
+              stopPolling();
+              showAlert(`轮询失败: ${error.message}`);
+            });
+          }, 0);
+        }
+      }
     }
   }
 
   function stopPolling() {
-    if (state.pollingTimer) {
+    if (state.pollingTimer !== null) {
       window.clearInterval(state.pollingTimer);
       state.pollingTimer = null;
     }
+    state.pollingInFlight = false;
+    state.pollingQueued = false;
   }
 
   function startPolling() {
