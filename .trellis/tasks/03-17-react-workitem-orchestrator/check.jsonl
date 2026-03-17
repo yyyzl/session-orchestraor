@@ -1,0 +1,7 @@
+{"file": ".agents/skills/finish-work/SKILL.md", "reason": "Finish work checklist"}
+{"file": ".agents/skills/check-backend/SKILL.md", "reason": "Backend check spec"}
+{"file": ".agents/skills/check-frontend/SKILL.md", "reason": "Frontend check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "检查 HTTP 错误映射与异常分层"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查测试覆盖与禁用模式"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "检查轮询停止与错误提示"}
+{"file": "tests/test_workflow_control.py", "reason": "对照既有编排测试模式新增回归用例"}

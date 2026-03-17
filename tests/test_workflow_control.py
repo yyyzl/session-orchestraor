@@ -377,6 +377,49 @@ class _RealCommitRunner(_BaseFakeRunner):
         )
 
 
+class _WorkItemWorkflowRunner(_BaseFakeRunner):
+    def run_step(
+        self,
+        *,
+        command_text: str,
+        global_round_index: int,
+        round_index_in_window: int,
+        window_index: int,
+        step_id: str,
+    ) -> RunnerStepResult:
+        if "下完成任务" in command_text or "内完成任务" in command_text:
+            scope_path = _extract_scope_path(command_text, "book-manage/")
+            scope_dir = self.project_root / scope_path.strip("/")
+            scope_dir.mkdir(parents=True, exist_ok=True)
+            (scope_dir / "work-item.txt").write_text(f"round={global_round_index}\n", encoding="utf-8")
+            return RunnerStepResult(
+                model_output_text="实现完成",
+                next_command_text="",
+                done=True,
+                meta={"step_status": "passed"},
+            )
+
+        if command_text == "git提交":
+            return RunnerStepResult(
+                model_output_text="git 提交通过",
+                next_command_text="",
+                done=False,
+                meta={
+                    "step_status": "passed",
+                    "commit_id": f"wi-{global_round_index:04d}",
+                    "commit_message": "feat: work item commit",
+                    "commit_scope": "book-manage/",
+                },
+            )
+
+        return RunnerStepResult(
+            model_output_text=f"{command_text} 已完成",
+            next_command_text="",
+            done=False,
+            meta={"step_status": "passed"},
+        )
+
+
 class WorkflowControlTests(unittest.TestCase):
     def _init_git_repo(self, root: Path) -> None:
         subprocess.run(
@@ -436,6 +479,32 @@ class WorkflowControlTests(unittest.TestCase):
                 return snapshot
             time.sleep(0.05)
         self.fail(f"run 未在超时内结束: {run_id}, last={snapshot}")
+
+    def _wait_until_status_not(self, orchestrator: SessionOrchestrator, run_id: str, status: str, timeout: float = 8.0) -> dict:
+        deadline = time.time() + timeout
+        snapshot = {}
+        while time.time() < deadline:
+            snapshot = orchestrator.get_snapshot(run_id)
+            if snapshot.get("status") != status:
+                return snapshot
+            time.sleep(0.05)
+        self.fail(f"run 状态未在超时内离开 {status}: {run_id}, last={snapshot}")
+
+    def _wait_until_status_in(
+        self,
+        orchestrator: SessionOrchestrator,
+        run_id: str,
+        statuses: set[str],
+        timeout: float = 8.0,
+    ) -> dict:
+        deadline = time.time() + timeout
+        snapshot = {}
+        while time.time() < deadline:
+            snapshot = orchestrator.get_snapshot(run_id)
+            if snapshot.get("status") in statuses:
+                return snapshot
+            time.sleep(0.05)
+        self.fail(f"run 状态未在超时内达到目标集合 {statuses}: {run_id}, last={snapshot}")
 
     def test_default_runtime_root_points_to_project_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -934,6 +1003,131 @@ class WorkflowControlTests(unittest.TestCase):
             meta = dict(git_step_started[0].get("meta", {}))
             self.assertEqual(meta.get("prompt_template_key"), "git_commit")
             self.assertTrue(str(meta.get("prompt_template_source", "")).strip())
+
+    def test_work_items_snapshot_and_human_review_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _WorkItemWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="wi-0",
+                task_prompt="实现 book-manage 页面并补齐测试",
+                task_type="dev",
+                workflow_mode="work_items",
+                mode="mock",
+                max_rounds=80,
+                max_rounds_per_window=80,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "paused")
+            self.assertEqual(snapshot.get("workflow_mode"), "work_items")
+            self.assertEqual(snapshot.get("pause_reason"), "human_review")
+
+            work_payload = orchestrator.get_work_items(run_id)
+            self.assertGreaterEqual(len(work_payload.get("work_items") or []), 1)
+            self.assertEqual(work_payload.get("current_work_item_id"), snapshot.get("current_work_item_id"))
+
+            events = orchestrator.get_events(run_id)
+            commands = [e["command_text"] for e in events if e.get("event_type") == "step_started"]
+            self.assertIn("command_review", commands)
+            self.assertIn("human_review", commands)
+            self.assertNotIn("git提交", commands)
+
+            orchestrator.submit_human_review(
+                run_id,
+                work_item_id=str(snapshot.get("current_work_item_id") or ""),
+                decision="approve",
+                note="ok",
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "completed")
+
+            events = orchestrator.get_events(run_id)
+            commands = [e["command_text"] for e in events if e.get("event_type") == "step_started"]
+            self.assertIn("git提交", commands)
+            self.assertLess(commands.index("human_review"), commands.index("git提交"))
+
+    def test_human_review_reject_creates_fix_work_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _WorkItemWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="wi-reject",
+                task_prompt="实现 book-manage 页面并补齐测试",
+                task_type="dev",
+                workflow_mode="work_items",
+                mode="mock",
+                max_rounds=160,
+                max_rounds_per_window=160,
+            )
+            snapshot = self._wait_status(orchestrator, run_id)
+            self.assertEqual(snapshot.get("status"), "paused")
+            self.assertEqual(snapshot.get("pause_reason"), "human_review")
+            first_id = str(snapshot.get("current_work_item_id") or "")
+
+            orchestrator.submit_human_review(
+                run_id,
+                work_item_id=first_id,
+                decision="reject",
+                note="needs fix",
+            )
+            snapshot = self._wait_status(orchestrator, run_id, timeout=10.0)
+            self.assertEqual(snapshot.get("status"), "paused")
+            self.assertEqual(snapshot.get("pause_reason"), "human_review")
+
+            work_payload = orchestrator.get_work_items(run_id)
+            items = work_payload.get("work_items") or []
+            self.assertGreaterEqual(len(items), 2)
+            self.assertNotEqual(work_payload.get("current_work_item_id"), first_id)
+            self.assertEqual(str(items[0].get("status") or ""), "failed")
+            self.assertEqual(int(items[0].get("failure_streak") or 0), 1)
+
+    def test_work_item_circuit_breaker_trips_after_repeated_reject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            orchestrator = SessionOrchestrator(
+                project_root=root,
+                runtime_root=root / "runtime",
+                runner_factory_map={"mock": _WorkItemWorkflowRunner},
+            )
+            run_id = orchestrator.start_run(
+                task_id="wi-cb",
+                task_prompt="实现 book-manage 页面并补齐测试",
+                task_type="dev",
+                workflow_mode="work_items",
+                mode="mock",
+                max_rounds=300,
+                max_rounds_per_window=300,
+            )
+
+            for idx in range(4):
+                snapshot = self._wait_status(orchestrator, run_id, timeout=12.0)
+                self.assertEqual(snapshot.get("status"), "paused")
+                pause_reason = str(snapshot.get("pause_reason") or "")
+                if pause_reason == "circuit_breaker":
+                    break
+                self.assertEqual(pause_reason, "human_review")
+                current_id = str(snapshot.get("current_work_item_id") or "")
+                orchestrator.submit_human_review(
+                    run_id,
+                    work_item_id=current_id,
+                    decision="reject",
+                    note=f"reject-{idx}",
+                )
+
+            snapshot = orchestrator.get_snapshot(run_id)
+            self.assertEqual(snapshot.get("status"), "paused")
+            self.assertEqual(snapshot.get("pause_reason"), "circuit_breaker")
 
 
 if __name__ == "__main__":

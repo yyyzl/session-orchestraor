@@ -1,0 +1,12 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "新增 API 与状态机：异常映射规范"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "事件流水与敏感信息约束"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "测试与后端质量清单"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "原生 DOM 组件化与可访问性"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "前端 state/els/request 模式"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端错误可见与轮询边界"}
+{"file": "src/orchestrator/service.py", "reason": "现有编排状态机与事件写入模式"}
+{"file": "src/orchestrator/web.py", "reason": "现有 HTTP API 路由与错误映射模式"}
+{"file": "src/frontend/app.js", "reason": "现有控制台状态管理与事件渲染模式"}

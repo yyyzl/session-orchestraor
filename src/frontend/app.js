@@ -2,6 +2,10 @@
   const state = {
     runId: "",
     status: "idle",
+    phase: "",
+    workflowMode: "work_items",
+    pauseReason: "",
+    currentWorkItemId: "",
     since: 0,
     pollingTimer: null,
   };
@@ -13,12 +17,14 @@
     workspaceProjectRoot: document.getElementById("workspace-project-root"),
     gitScopePath: document.getElementById("git-scope-path"),
     mode: document.getElementById("mode"),
+    workflowMode: document.getElementById("workflow-mode"),
     operatorId: document.getElementById("operator-id"),
     restartBtn: document.getElementById("restart-btn"),
     reportBtn: document.getElementById("report-btn"),
     reportBox: document.getElementById("report-box"),
     runIdLine: document.getElementById("run-id-line"),
     status: document.getElementById("status"),
+    phase: document.getElementById("phase"),
     window: document.getElementById("window"),
     round: document.getElementById("round"),
     step: document.getElementById("step"),
@@ -27,6 +33,15 @@
     chatInput: document.getElementById("chat-input"),
     conversation: document.getElementById("conversation"),
     globalAlert: document.getElementById("global-alert"),
+    workItemCurrentBox: document.getElementById("workitem-current-box"),
+    workItemList: document.getElementById("workitem-list"),
+    reviewStatus: document.getElementById("review-status"),
+    commandReviewBox: document.getElementById("command-review-box"),
+    humanReviewNote: document.getElementById("human-review-note"),
+    approveBtn: document.getElementById("approve-btn"),
+    rejectBtn: document.getElementById("reject-btn"),
+    pauseBtn: document.getElementById("pause-btn"),
+    resumeBtn: document.getElementById("resume-btn"),
   };
 
   async function request(path, options = {}) {
@@ -126,7 +141,14 @@
   function renderSnapshot(snapshot) {
     const statusText = toText(snapshot.status) || "idle";
     state.status = statusText;
+    state.phase = toText(snapshot.phase);
+    state.workflowMode = toText(snapshot.workflow_mode) || state.workflowMode;
+    state.pauseReason = toText(snapshot.pause_reason);
+    state.currentWorkItemId = toText(snapshot.current_work_item_id);
     els.status.textContent = statusText;
+    if (els.phase) {
+      els.phase.textContent = state.phase || "-";
+    }
     els.window.textContent = `${snapshot.current_window_index ?? "-"} / ${snapshot.current_window_id ?? "-"}`;
     els.round.textContent = `${snapshot.current_round_index_in_window ?? "-"}`;
     els.step.textContent = toText(snapshot.current_workflow_step || snapshot.current_step_id) || "-";
@@ -138,10 +160,16 @@
     stopPolling();
     state.runId = "";
     state.status = "idle";
+    state.phase = "";
+    state.pauseReason = "";
+    state.currentWorkItemId = "";
     state.since = 0;
 
     els.runIdLine.textContent = "run_id: -";
     els.status.textContent = "idle";
+    if (els.phase) {
+      els.phase.textContent = "-";
+    }
     els.window.textContent = "-";
     els.round.textContent = "-";
     els.step.textContent = "-";
@@ -149,6 +177,21 @@
 
     els.reportBox.textContent = "";
     els.conversation.innerHTML = "";
+    if (els.workItemList) {
+      els.workItemList.innerHTML = "";
+    }
+    if (els.workItemCurrentBox) {
+      els.workItemCurrentBox.textContent = "";
+    }
+    if (els.reviewStatus) {
+      els.reviewStatus.textContent = "";
+    }
+    if (els.commandReviewBox) {
+      els.commandReviewBox.textContent = "";
+    }
+    if (els.humanReviewNote) {
+      els.humanReviewNote.value = "";
+    }
   }
 
   function summarizePolicy(meta) {
@@ -233,6 +276,122 @@
     }
   }
 
+  function clearWorkItemPanels() {
+    if (els.workItemList) {
+      els.workItemList.innerHTML = "";
+    }
+    if (els.workItemCurrentBox) {
+      els.workItemCurrentBox.textContent = "";
+    }
+    if (els.reviewStatus) {
+      els.reviewStatus.textContent = "";
+    }
+    if (els.commandReviewBox) {
+      els.commandReviewBox.textContent = "";
+    }
+  }
+
+  function renderWorkItems(payload) {
+    const workItems = Array.isArray(payload.work_items) ? payload.work_items : [];
+    const currentId = toText(payload.current_work_item_id);
+    const current =
+      payload.current_item && typeof payload.current_item === "object"
+        ? payload.current_item
+        : null;
+
+    state.currentWorkItemId = currentId;
+
+    if (els.workItemCurrentBox) {
+      const lines = [];
+      lines.push(`goal: ${toText(payload.goal) || "-"}`);
+      lines.push(`phase: ${toText(payload.phase) || "-"}`);
+      lines.push(`current_work_item_id: ${currentId || "-"}`);
+      if (current) {
+        lines.push(`title: ${toText(current.title) || "-"}`);
+        lines.push(`status: ${toText(current.status) || "-"}`);
+        lines.push(`scope: ${toText(current.scope_path) || "-"}`);
+        const required = Number(current.review_required || 0);
+        const passed = Number(current.review_passed || 0);
+        if (required) {
+          lines.push(`review: ${passed}/${required}`);
+        }
+        const acceptance = Array.isArray(current.acceptance) ? current.acceptance : [];
+        if (acceptance.length) {
+          lines.push("acceptance:");
+          for (const item of acceptance.slice(0, 10)) {
+            lines.push(`- ${toText(item)}`);
+          }
+        }
+      }
+      els.workItemCurrentBox.textContent = lines.join("\n").trim();
+    }
+
+    if (els.workItemList) {
+      els.workItemList.innerHTML = "";
+      for (const item of workItems) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const li = document.createElement("li");
+        const itemId = toText(item.id);
+        li.dataset.current = itemId && itemId === currentId ? "true" : "false";
+        li.dataset.status = toText(item.status);
+
+        const title = document.createElement("div");
+        title.className = "workitem-title";
+        title.textContent = toText(item.title) || itemId || "未命名 WorkItem";
+
+        const meta = document.createElement("div");
+        meta.className = "workitem-meta";
+        meta.textContent = `id=${itemId || "-"} root=${toText(item.root_id) || "-"} scope=${toText(item.scope_path) || "-"}`;
+
+        const status = document.createElement("div");
+        status.className = "workitem-status";
+        const required = Number(item.review_required || 0);
+        const passed = Number(item.review_passed || 0);
+        status.textContent = `status=${toText(item.status) || "-"} review=${passed}/${required}`;
+
+        li.appendChild(title);
+        li.appendChild(meta);
+        li.appendChild(status);
+        els.workItemList.appendChild(li);
+      }
+    }
+
+    const canHumanReview =
+      state.runId &&
+      state.status === "paused" &&
+      state.pauseReason === "human_review" &&
+      currentId;
+
+    if (els.reviewStatus) {
+      const hint = canHumanReview
+        ? "当前等待人工评审：请选择通过或打回"
+        : state.pauseReason
+        ? `pause_reason: ${state.pauseReason}`
+        : "";
+      els.reviewStatus.textContent = hint;
+    }
+
+    if (els.commandReviewBox) {
+      const review = current && current.last_command_review ? current.last_command_review : null;
+      els.commandReviewBox.textContent = review && toText(review.summary) ? toText(review.summary) : "";
+    }
+
+    if (els.approveBtn) {
+      els.approveBtn.disabled = !canHumanReview;
+    }
+    if (els.rejectBtn) {
+      els.rejectBtn.disabled = !canHumanReview;
+    }
+    if (els.pauseBtn) {
+      els.pauseBtn.disabled = !state.runId || terminalStatuses.has(state.status);
+    }
+    if (els.resumeBtn) {
+      els.resumeBtn.disabled = !state.runId || state.status !== "paused";
+    }
+  }
+
   async function pollOnce() {
     if (!state.runId) {
       return;
@@ -240,6 +399,13 @@
 
     const snapshot = await request(`/api/runs/${state.runId}`);
     renderSnapshot(snapshot);
+
+    if (toText(snapshot.workflow_mode) === "work_items") {
+      const workItemsPayload = await request(`/api/runs/${state.runId}/work-items`);
+      renderWorkItems(workItemsPayload);
+    } else {
+      clearWorkItemPanels();
+    }
 
     const evResp = await request(`/api/runs/${state.runId}/events?since=${state.since}`);
     const events = Array.isArray(evResp.events) ? evResp.events : [];
@@ -280,11 +446,16 @@
   }
 
   async function startRunByFirstMessage(firstPrompt) {
+    const workflowMode = toText(els.workflowMode && els.workflowMode.value) || "work_items";
+    const maxRounds = workflowMode === "work_items" ? 80 : 12;
     const payload = {
       task_id: toText(els.taskId.value) || "session-task",
       task_prompt: toText(firstPrompt),
       task_type: "dev",
+      workflow_mode: workflowMode,
       mode: toText(els.mode.value) || "mock",
+      max_rounds: maxRounds,
+      max_rounds_per_window: maxRounds,
       workspace_project_root: toText(els.workspaceProjectRoot.value),
       git_scope_path: toText(els.gitScopePath.value),
       step_delay_seconds: toText(els.mode.value) === "mock" ? 0.2 : 0,
@@ -389,6 +560,77 @@
       showAlert(`报告导出失败: ${error.message}`);
     }
   });
+
+  async function submitHumanReview(decision) {
+    if (!state.runId) {
+      showAlert("当前没有运行");
+      return;
+    }
+    if (!state.currentWorkItemId) {
+      showAlert("当前未选择 WorkItem");
+      return;
+    }
+    await request(`/api/runs/${state.runId}/human-review`, {
+      method: "POST",
+      body: JSON.stringify({
+        work_item_id: state.currentWorkItemId,
+        decision,
+        note: toText(els.humanReviewNote && els.humanReviewNote.value),
+      }),
+    });
+    if (els.humanReviewNote) {
+      els.humanReviewNote.value = "";
+    }
+    await pollOnce();
+  }
+
+  async function pauseRun() {
+    if (!state.runId) {
+      showAlert("当前没有运行");
+      return;
+    }
+    await request(`/api/runs/${state.runId}/pause`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason: "human_request",
+        note: toText(els.humanReviewNote && els.humanReviewNote.value),
+      }),
+    });
+    await pollOnce();
+  }
+
+  async function resumeRun() {
+    if (!state.runId) {
+      showAlert("当前没有运行");
+      return;
+    }
+    await request(`/api/runs/${state.runId}/resume`, { method: "POST", body: "{}" });
+    await pollOnce();
+  }
+
+  if (els.approveBtn) {
+    els.approveBtn.addEventListener("click", () => {
+      submitHumanReview("approve").catch((error) => showAlert(`提交失败: ${error.message}`));
+    });
+  }
+
+  if (els.rejectBtn) {
+    els.rejectBtn.addEventListener("click", () => {
+      submitHumanReview("reject").catch((error) => showAlert(`提交失败: ${error.message}`));
+    });
+  }
+
+  if (els.pauseBtn) {
+    els.pauseBtn.addEventListener("click", () => {
+      pauseRun().catch((error) => showAlert(`暂停失败: ${error.message}`));
+    });
+  }
+
+  if (els.resumeBtn) {
+    els.resumeBtn.addEventListener("click", () => {
+      resumeRun().catch((error) => showAlert(`继续失败: ${error.message}`));
+    });
+  }
 
   resetState();
   appendMessage({

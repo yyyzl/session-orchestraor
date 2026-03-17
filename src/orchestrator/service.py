@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -190,14 +191,23 @@ def _build_scoped_task_prompt(
     task_type: str,
     prompt_config: Dict[str, Any],
     template_variables: Dict[str, str],
+    work_item_id: str = "",
+    work_item_title: str = "",
+    acceptance: Optional[list[str]] = None,
 ) -> str:
     normalized_task = (task_prompt or "").strip() or "完成当前需求"
     if scope_path and not scope_path.endswith("/"):
         # 作用域是单文件时，避免“在目录 xxx 下”这类歧义表述。
         scope_label = _scope_label(scope_path)
-        return (
+        base_prompt = (
             f"在路径 {scope_label} 内完成任务：{normalized_task}\n"
             f"约束：所有新增或修改文件必须位于 {scope_label}；不要改动其他业务目录。"
+        )
+        return _append_work_item_context(
+            base_prompt,
+            work_item_id=work_item_id,
+            work_item_title=work_item_title,
+            acceptance=acceptance,
         )
 
     template, _ = _resolve_prompt_template(
@@ -217,7 +227,41 @@ def _build_scoped_task_prompt(
             "scope_path": _scope_label(scope_path),
         }
     )
-    return _render_template(template, variables)
+    base_prompt = _render_template(template, variables)
+    return _append_work_item_context(
+        base_prompt,
+        work_item_id=work_item_id,
+        work_item_title=work_item_title,
+        acceptance=acceptance,
+    )
+
+
+def _append_work_item_context(
+    base_prompt: str,
+    *,
+    work_item_id: str,
+    work_item_title: str,
+    acceptance: Optional[list[str]],
+) -> str:
+    if not (work_item_id or work_item_title or acceptance):
+        return base_prompt
+
+    normalized_acceptance = [str(item or "").strip() for item in (acceptance or [])]
+    normalized_acceptance = [item for item in normalized_acceptance if item]
+
+    extra_lines: list[str] = []
+    if work_item_id or work_item_title:
+        title = (work_item_title or "").strip() or "未命名 WorkItem"
+        suffix = f"（id={work_item_id}）" if str(work_item_id or "").strip() else ""
+        extra_lines.append(f"当前 WorkItem：{title}{suffix}")
+    if normalized_acceptance:
+        extra_lines.append("验收点：")
+        for idx, item in enumerate(normalized_acceptance, 1):
+            extra_lines.append(f"- [{idx}] {item}")
+    extra_lines.append("约束：仅围绕当前 WorkItem 的验收点推进；禁止跨 WorkItem 混改。")
+
+    base = (base_prompt or "").rstrip()
+    return f"{base}\n\n" + "\n".join(extra_lines).rstrip()
 
 
 def _build_git_commit_command(
@@ -267,6 +311,8 @@ def _build_workflow_steps(
     scope_path: str,
     prompt_config: Dict[str, Any],
     template_variables: Dict[str, str],
+    workflow_mode: str = "classic",
+    work_item: Optional[Dict[str, Any]] = None,
 ) -> list[Dict[str, Any]]:
     if task_type != "dev":
         return []
@@ -283,7 +329,13 @@ def _build_workflow_steps(
         template_variables=template_variables,
     )
 
-    return [
+    work_item_id = str((work_item or {}).get("id") or "")
+    work_item_title = str((work_item or {}).get("title") or "")
+    work_item_acceptance = (work_item or {}).get("acceptance")
+    if not isinstance(work_item_acceptance, list):
+        work_item_acceptance = []
+
+    steps: list[Dict[str, Any]] = [
         {"name": "$start", "command": "$start"},
         {"name": before_step, "command": before_step},
         {
@@ -294,17 +346,67 @@ def _build_workflow_steps(
                 task_type=task_type,
                 prompt_config=prompt_config,
                 template_variables=template_variables,
+                work_item_id=work_item_id,
+                work_item_title=work_item_title,
+                acceptance=work_item_acceptance,
             ),
         },
         {"name": check_step, "command": check_step},
         {"name": "$finish-work", "command": "$finish-work"},
+    ]
+
+    if workflow_mode == "work_items":
+        steps.extend(
+            [
+                {"name": "command_review", "command": "command_review"},
+                {"name": "human_review", "command": "human_review"},
+            ]
+        )
+
+    steps.extend(
+        [
         {
             "name": "git提交",
             "command": git_command,
             "meta": git_meta,
         },
         {"name": "$record-session", "command": "$record-session"},
-    ]
+        ]
+    )
+    return steps
+
+
+def _new_work_item_id() -> str:
+    return f"wi_{uuid.uuid4().hex[:8]}"
+
+
+def _infer_work_item_title(goal: str) -> str:
+    text = (goal or "").strip()
+    if not text:
+        return "推进当前目标"
+    first_line = text.splitlines()[0].strip()
+    if not first_line:
+        return "推进当前目标"
+    if len(first_line) > 48:
+        return first_line[:48].rstrip() + "…"
+    return first_line
+
+
+def _build_initial_work_items(*, goal: str, scope_path: str, review_required_default: int) -> tuple[list[Dict[str, Any]], str]:
+    work_item_id = _new_work_item_id()
+    item = {
+        "id": work_item_id,
+        "root_id": work_item_id,
+        "title": _infer_work_item_title(goal),
+        "acceptance": [],
+        "scope_path": scope_path,
+        "status": "planned",
+        "review_required": int(review_required_default),
+        "review_passed": 0,
+        "failure_streak": 0,
+        "notes": "",
+    }
+    return [item], work_item_id
 
 
 @dataclass
@@ -313,6 +415,7 @@ class _RunContext:
     task_id: str
     task_prompt: str
     task_type: str
+    workflow_mode: str
     max_rounds: int
     max_rounds_per_window: int
     mode: str
@@ -327,6 +430,9 @@ class _RunContext:
     snapshot: Dict[str, Any]
     event_seq: int = 0
     interrupted: bool = False
+    pause_requested: bool = False
+    pause_reason: str = ""
+    resume_event: threading.Event = field(default_factory=threading.Event)
     stop_requested: bool = False
     thread: Optional[threading.Thread] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -336,6 +442,9 @@ class _RunContext:
     step_max_retry: int = 1
     dev_unfinished_threshold_n: int = 1
     dev_unfinished_streak: int = 0
+    review_required_default: int = 2
+    circuit_breaker_threshold: int = 3
+    max_planner_retry: int = 3
     task_done_signal: bool = False
     last_commit_id: str = ""
     last_commit_message: str = ""
@@ -368,6 +477,7 @@ class SessionOrchestrator:
         task_id: str,
         task_prompt: str,
         task_type: str = "dev",
+        workflow_mode: str = "classic",
         mode: str = "mock",
         model_id: str = "gpt-5.3-codex",
         reasoning_level: str = "medium",
@@ -391,6 +501,9 @@ class SessionOrchestrator:
             raise ValueError("dev_unfinished_threshold_n 必须大于 0")
         if mode not in self.runner_factory_map:
             raise ValueError(f"不支持的 mode: {mode}")
+        normalized_workflow_mode = str(workflow_mode or "classic").strip() or "classic"
+        if normalized_workflow_mode not in {"classic", "work_items"}:
+            raise ValueError(f"不支持的 workflow_mode: {normalized_workflow_mode}")
 
         resolved_workspace = self._resolve_workspace_project_root(workspace_project_root)
         resolved_prompt_path = self._resolve_prompt_config_path(prompt_config_path)
@@ -406,13 +519,39 @@ class SessionOrchestrator:
             changed_files="",
             summary="",
         )
+
+        review_required_default = 2
+        circuit_breaker_threshold = 3
+        max_planner_retry = 3
+
+        work_item: Optional[Dict[str, Any]] = None
+        workflow_prompt = task_prompt
+        workflow_scope = resolved_scope
+        phase = ""
+        pause_reason = ""
+        work_items: list[Dict[str, Any]] = []
+        current_work_item_id = ""
+        if normalized_workflow_mode == "work_items":
+            phase = "planning"
+            work_items, current_work_item_id = _build_initial_work_items(
+                goal=task_prompt,
+                scope_path=resolved_scope,
+                review_required_default=review_required_default,
+            )
+            work_item = next((item for item in work_items if str(item.get("id", "")) == current_work_item_id), None)
+            if work_item is None:
+                raise RuntimeError("初始化 work_items 失败：未找到 current_work_item_id 对应项")
+            workflow_prompt = str(work_item.get("title") or task_prompt)
+            workflow_scope = str(work_item.get("scope_path") or resolved_scope)
         workflow_steps = _build_workflow_steps(
             task_type=task_type,
-            task_prompt=task_prompt,
+            task_prompt=workflow_prompt,
             mode=mode,
-            scope_path=resolved_scope,
+            scope_path=workflow_scope,
             prompt_config=prompt_config,
             template_variables=template_variables,
+            workflow_mode=normalized_workflow_mode,
+            work_item=work_item,
         )
         if workflow_steps:
             max_rounds = max(max_rounds, len(workflow_steps))
@@ -422,6 +561,15 @@ class SessionOrchestrator:
             "run_id": run_id,
             "task_id": task_id,
             "task_type": task_type,
+            "workflow_mode": normalized_workflow_mode,
+            "goal": task_prompt if normalized_workflow_mode == "work_items" else "",
+            "phase": phase or ("executing_item" if normalized_workflow_mode == "work_items" else ""),
+            "work_items": work_items,
+            "current_work_item_id": current_work_item_id,
+            "pause_reason": pause_reason,
+            "review_required_default": review_required_default,
+            "circuit_breaker_threshold": circuit_breaker_threshold,
+            "max_planner_retry": max_planner_retry,
             "status": "running",
             "current_window_index": 1,
             "current_window_id": window_id,
@@ -450,6 +598,7 @@ class SessionOrchestrator:
             task_id=task_id,
             task_prompt=task_prompt,
             task_type=task_type,
+            workflow_mode=normalized_workflow_mode,
             max_rounds=max_rounds,
             max_rounds_per_window=max_rounds_per_window,
             mode=mode,
@@ -465,6 +614,9 @@ class SessionOrchestrator:
             workflow_steps=workflow_steps,
             step_max_retry=step_max_retry,
             dev_unfinished_threshold_n=dev_unfinished_threshold_n,
+            review_required_default=review_required_default,
+            circuit_breaker_threshold=circuit_breaker_threshold,
+            max_planner_retry=max_planner_retry,
         )
         worker = threading.Thread(target=self._run_loop, args=(ctx,), daemon=True)
         ctx.thread = worker
@@ -479,6 +631,157 @@ class SessionOrchestrator:
     def get_events(self, run_id: str, since_seq: int = 0) -> list[Dict[str, Any]]:
         events = self.store.load_events(run_id)
         return [event for event in events if int(event.get("event_seq", 0)) > int(since_seq)]
+
+    def get_work_items(self, run_id: str) -> Dict[str, Any]:
+        snapshot = self.get_snapshot(run_id)
+        items = snapshot.get("work_items")
+        work_items: list[Dict[str, Any]] = items if isinstance(items, list) else []
+        current_id = str(snapshot.get("current_work_item_id") or "")
+        current_item = None
+        for item in work_items:
+            if isinstance(item, dict) and str(item.get("id") or "") == current_id:
+                current_item = item
+                break
+        return {
+            "run_id": str(snapshot.get("run_id") or run_id),
+            "goal": str(snapshot.get("goal") or ""),
+            "phase": str(snapshot.get("phase") or ""),
+            "current_work_item_id": current_id,
+            "work_items": work_items,
+            "current_item": current_item or {},
+        }
+
+    def submit_human_review(self, run_id: str, *, work_item_id: str, decision: str, note: str = "") -> None:
+        normalized_decision = str(decision or "").strip().lower()
+        if normalized_decision not in {"approve", "reject"}:
+            raise ValueError("decision 必须是 approve 或 reject")
+
+        ctx = self._must_get_context(run_id)
+        should_wait_for_circuit_breaker = False
+        with ctx.lock:
+            if not self._is_work_items_mode(ctx):
+                raise RuntimeError("当前 run 未启用 work_items 编排模式")
+            if str(ctx.snapshot.get("status") or "") != "paused" or str(ctx.snapshot.get("pause_reason") or "") != "human_review":
+                raise RuntimeError("当前 run 不在 human_review 暂停阶段，禁止提交人工评审结果")
+            current_id = str(ctx.snapshot.get("current_work_item_id") or "")
+            if str(work_item_id or "").strip() != current_id:
+                raise RuntimeError(f"work_item_id 不匹配当前项：current={current_id}")
+
+            if normalized_decision == "reject":
+                item = self._current_work_item(ctx)
+                if item is not None:
+                    item_root_id = str(item.get("root_id") or item.get("id") or "")
+                    root_item = self._find_work_item(ctx, item_root_id) or item
+                    current_streak = int(root_item.get("failure_streak") or 0)
+                    threshold = max(1, int(ctx.circuit_breaker_threshold))
+                    should_wait_for_circuit_breaker = (current_streak + 1) > threshold
+
+            ctx.snapshot["human_review_decision"] = {
+                "work_item_id": current_id,
+                "decision": normalized_decision,
+                "note": str(note or "")[:500],
+                "at": _utc_now(),
+            }
+            # 让调用方立即看到 run 已离开 paused（避免 wait_status 读到旧快照直接返回 paused）。
+            ctx.snapshot["pause_reason"] = ""
+            ctx.pause_reason = ""
+            if self._is_work_items_mode(ctx) and str(ctx.snapshot.get("phase") or "") == "paused":
+                ctx.snapshot["phase"] = "reviewing_item"
+            self._update_status(ctx, "running")
+            self._append_event(
+                ctx,
+                event_type="human_review_submitted",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={
+                    "work_item_id": current_id,
+                    "decision": normalized_decision,
+                },
+            )
+            ctx.resume_event.set()
+
+        if should_wait_for_circuit_breaker:
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                with ctx.lock:
+                    status = str(ctx.snapshot.get("status") or "")
+                    pause_reason = str(ctx.snapshot.get("pause_reason") or "")
+                    if status == "paused" and pause_reason == "circuit_breaker":
+                        return
+                time.sleep(0.02)
+
+    def pause_run(self, run_id: str, *, reason: str = "human_request", note: str = "") -> None:
+        ctx = self._must_get_context(run_id)
+        with ctx.lock:
+            if str(ctx.snapshot.get("status") or "") not in {"running", "paused"}:
+                raise RuntimeError(f"当前 run 状态不允许暂停: {ctx.snapshot.get('status')}")
+            ctx.pause_requested = True
+            ctx.pause_reason = str(reason or "human_request").strip() or "human_request"
+            self._append_event(
+                ctx,
+                event_type="pause_requested",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={"reason": ctx.pause_reason, "note": str(note or "")[:300]},
+            )
+
+    def resume_run(self, run_id: str) -> None:
+        ctx = self._must_get_context(run_id)
+        with ctx.lock:
+            if str(ctx.snapshot.get("status") or "") != "paused":
+                raise RuntimeError(f"当前 run 不处于 paused 状态: {ctx.snapshot.get('status')}")
+            self._append_event(
+                ctx,
+                event_type="resume_requested",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={
+                    "pause_reason": str(ctx.snapshot.get("pause_reason") or ""),
+                },
+            )
+            ctx.resume_event.set()
+
+    def replan(self, run_id: str, *, instruction: str = "") -> None:
+        ctx = self._must_get_context(run_id)
+        with ctx.lock:
+            if not self._is_work_items_mode(ctx):
+                raise RuntimeError("当前 run 未启用 work_items 编排模式")
+
+            title = str(instruction or "").strip().splitlines()[0].strip() if str(instruction or "").strip() else "补充工作项"
+            if len(title) > 48:
+                title = title[:48].rstrip() + "…"
+            new_id = _new_work_item_id()
+            item = {
+                "id": new_id,
+                "root_id": new_id,
+                "title": title,
+                "acceptance": [],
+                "scope_path": str(ctx.git_scope_path or ""),
+                "status": "planned",
+                "review_required": int(ctx.review_required_default),
+                "review_passed": 0,
+                "failure_streak": 0,
+                "notes": "",
+            }
+            self._get_work_items_ref(ctx).append(item)
+            ctx.snapshot["phase"] = "planning"
+            self._persist_snapshot(ctx)
+            self._append_event(
+                ctx,
+                event_type="replan_requested",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={
+                    "instruction": str(instruction or "")[:500],
+                    "created_work_item_id": new_id,
+                },
+            )
+            if str(ctx.snapshot.get("status") or "") == "paused":
+                ctx.resume_event.set()
 
     def send_operator_message(self, run_id: str, *, operator_id: str, text: str) -> None:
         ctx = self._must_get_context(run_id)
@@ -520,6 +823,28 @@ class SessionOrchestrator:
         )
         current_command = ctx.task_prompt
 
+        if self._is_work_items_mode(ctx):
+            with ctx.lock:
+                ctx.snapshot["phase"] = str(ctx.snapshot.get("phase") or "planning") or "planning"
+                current = self._current_work_item(ctx) or self._select_next_planned_work_item(ctx)
+                if current is not None and str(current.get("status") or "") == "planned":
+                    current["status"] = "in_progress"
+                if str(ctx.snapshot.get("phase") or "") == "planning":
+                    ctx.snapshot["phase"] = "executing_item"
+                self._persist_snapshot(ctx)
+                if current is not None:
+                    self._append_event(
+                        ctx,
+                        event_type="work_item_selected",
+                        command_text="",
+                        model_output_text="",
+                        operator_id="",
+                        meta={
+                            "work_item_id": str(current.get("id") or ""),
+                            "root_id": str(current.get("root_id") or ""),
+                        },
+                    )
+
         try:
             runner.start()
             self._append_event(
@@ -531,6 +856,7 @@ class SessionOrchestrator:
                 meta={},
             )
             for _ in range(ctx.max_rounds):
+                pause_reason_to_wait = ""
                 with ctx.lock:
                     if ctx.stop_requested:
                         self._update_status(ctx, "stopped")
@@ -542,10 +868,28 @@ class SessionOrchestrator:
                             command_text=current_command,
                             model_output_text="",
                             operator_id="",
-                            meta={},
+                            meta={"reason": "operator_message"},
                         )
-                        self._update_status(ctx, "paused")
-                        break
+                        ctx.interrupted = False
+                        ctx.pause_requested = True
+                        ctx.pause_reason = "operator_message"
+
+                    if ctx.pause_requested:
+                        pause_reason_to_wait = str(ctx.pause_reason or "paused")
+                        if ctx.snapshot.get("status") != "paused" or ctx.snapshot.get("pause_reason") != pause_reason_to_wait:
+                            ctx.snapshot["pause_reason"] = pause_reason_to_wait
+                            if self._is_work_items_mode(ctx):
+                                ctx.snapshot["phase"] = "paused"
+                            self._update_status(ctx, "paused")
+                            ctx.resume_event.clear()
+                            self._append_event(
+                                ctx,
+                                event_type="paused",
+                                command_text="",
+                                model_output_text="",
+                                operator_id="",
+                                meta={"reason": pause_reason_to_wait},
+                            )
 
                     if not self._uses_fixed_workflow(ctx):
                         if (
@@ -575,6 +919,34 @@ class SessionOrchestrator:
                                 meta={},
                             )
 
+                if pause_reason_to_wait:
+                    while True:
+                        if ctx.stop_requested:
+                            break
+                        if ctx.resume_event.wait(timeout=0.5):
+                            break
+                    ctx.resume_event.clear()
+                    with ctx.lock:
+                        if ctx.stop_requested:
+                            self._update_status(ctx, "stopped")
+                            break
+                        ctx.pause_requested = False
+                        ctx.pause_reason = ""
+                        ctx.snapshot["pause_reason"] = ""
+                        if self._is_work_items_mode(ctx) and str(ctx.snapshot.get("phase") or "") == "paused":
+                            ctx.snapshot["phase"] = "executing_item"
+                        self._update_status(ctx, "running")
+                        self._append_event(
+                            ctx,
+                            event_type="resumed",
+                            command_text="",
+                            model_output_text="",
+                            operator_id="",
+                            meta={"reason": pause_reason_to_wait},
+                        )
+                    continue
+
+                with ctx.lock:
                     step_name = "task_prompt"
                     if self._uses_fixed_workflow(ctx):
                         step = self._current_workflow_step(ctx)
@@ -668,18 +1040,6 @@ class SessionOrchestrator:
                         ctx.snapshot["current_workflow_step_status"] = step_status
                         self._persist_snapshot(ctx)
 
-                    if ctx.interrupted:
-                        self._append_event(
-                            ctx,
-                            event_type="interrupted",
-                            command_text=current_command,
-                            model_output_text=result.model_output_text,
-                            operator_id="",
-                            meta={"reason": "operator_message"},
-                        )
-                        self._update_status(ctx, "paused")
-                        break
-
                     if step_status == "passed":
                         if step_name == "git提交":
                             self._capture_commit_evidence(ctx, result)
@@ -689,6 +1049,20 @@ class SessionOrchestrator:
                         if self._uses_fixed_workflow(ctx):
                             self._advance_workflow_step(ctx)
                             if self._workflow_finished(ctx):
+                                if self._is_work_items_mode(ctx):
+                                    self._append_policy_decision(
+                                        ctx,
+                                        step_name=step_name,
+                                        decision_basis="work_item_workflow_completed",
+                                        decision_result="continue_same_window",
+                                        action="advance_work_item",
+                                        reason="workflow_completed",
+                                    )
+                                    completed = self._handle_work_item_workflow_completed(ctx)
+                                    if completed:
+                                        break
+                                    continue
+
                                 if ctx.task_done_signal:
                                     self._append_policy_decision(
                                         ctx,
@@ -779,6 +1153,24 @@ class SessionOrchestrator:
                         )
                         current_command = result.next_command_text or current_command
                     else:
+                        if self._uses_fixed_workflow(ctx) and self._is_work_items_mode(ctx):
+                            self._append_policy_decision(
+                                ctx,
+                                step_name=step_name,
+                                decision_basis="work_item_step_failed",
+                                decision_result="continue_same_window",
+                                action="create_fix_item",
+                                reason="step_failed",
+                                extra={"failure_code": step_meta.get("failure_code", "")},
+                            )
+                            self._handle_work_item_step_failed(
+                                ctx,
+                                step_name=step_name,
+                                failure_code=str(step_meta.get("failure_code", "") or ""),
+                                evidence=str(result.model_output_text or ""),
+                            )
+                            continue
+
                         if self._uses_fixed_workflow(ctx) and ctx.workflow_step_attempt < ctx.step_max_retry:
                             ctx.workflow_step_attempt += 1
                             ctx.snapshot["current_workflow_step_attempt"] = ctx.workflow_step_attempt + 1
@@ -1000,13 +1392,241 @@ class SessionOrchestrator:
         self._reset_unfinished_streak(ctx)
         return True
 
+    def _is_work_items_mode(self, ctx: _RunContext) -> bool:
+        return ctx.workflow_mode == "work_items"
+
+    def _get_work_items_ref(self, ctx: _RunContext) -> list[Dict[str, Any]]:
+        raw = ctx.snapshot.get("work_items")
+        if not isinstance(raw, list):
+            raw = []
+            ctx.snapshot["work_items"] = raw
+        return raw
+
+    def _find_work_item(self, ctx: _RunContext, work_item_id: str) -> Optional[Dict[str, Any]]:
+        target_id = str(work_item_id or "").strip()
+        if not target_id:
+            return None
+        for item in self._get_work_items_ref(ctx):
+            if isinstance(item, dict) and str(item.get("id") or "") == target_id:
+                return item
+        return None
+
+    def _current_work_item(self, ctx: _RunContext) -> Optional[Dict[str, Any]]:
+        return self._find_work_item(ctx, str(ctx.snapshot.get("current_work_item_id") or ""))
+
+    def _select_next_planned_work_item(self, ctx: _RunContext) -> Optional[Dict[str, Any]]:
+        for item in self._get_work_items_ref(ctx):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") != "planned":
+                continue
+            next_id = str(item.get("id") or "").strip()
+            if not next_id:
+                continue
+            ctx.snapshot["current_work_item_id"] = next_id
+            item["status"] = "in_progress"
+            return item
+        return None
+
+    def _current_workflow_inputs(self, ctx: _RunContext) -> tuple[str, str, Optional[Dict[str, Any]]]:
+        if not self._is_work_items_mode(ctx):
+            return ctx.git_scope_path, ctx.task_prompt, None
+        item = self._current_work_item(ctx) or self._select_next_planned_work_item(ctx)
+        if item is None:
+            return ctx.git_scope_path, ctx.task_prompt, None
+        scope_path = str(item.get("scope_path") or ctx.git_scope_path)
+        prompt = str(item.get("title") or ctx.task_prompt)
+        return scope_path, prompt, item
+
+    def _mark_current_work_item_done(self, ctx: _RunContext) -> None:
+        item = self._current_work_item(ctx)
+        if item is None:
+            return
+        item["status"] = "done"
+
+        notes_lines: list[str] = []
+        if ctx.last_commit_id:
+            notes_lines.append(f"commit: {ctx.last_commit_id}")
+        if ctx.last_commit_message:
+            notes_lines.append(f"message: {ctx.last_commit_message}")
+        existing_notes = str(item.get("notes") or "").strip()
+        if existing_notes:
+            notes_lines.extend(existing_notes.splitlines())
+        item["notes"] = "\n".join(notes_lines[:10]).strip()
+
+    def _handle_work_item_workflow_completed(self, ctx: _RunContext) -> bool:
+        item = self._current_work_item(ctx)
+        if item is None:
+            self._append_event(
+                ctx,
+                event_type="work_item_missing",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={"reason": "workflow_completed_without_current_item"},
+            )
+            ctx.snapshot["phase"] = "failed"
+            self._update_status(ctx, "failed")
+            return True
+
+        self._mark_current_work_item_done(ctx)
+        self._append_event(
+            ctx,
+            event_type="work_item_done",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={
+                "work_item_id": str(item.get("id") or ""),
+                "root_id": str(item.get("root_id") or ""),
+            },
+        )
+
+        next_item = self._select_next_planned_work_item(ctx)
+        if next_item is None:
+            ctx.snapshot["phase"] = "completed"
+            self._append_event(
+                ctx,
+                event_type="window_closed",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={"reason": "completed"},
+            )
+            self._update_status(ctx, "completed")
+            return True
+
+        ctx.snapshot["phase"] = "executing_item"
+        self._persist_snapshot(ctx)
+        self._append_event(
+            ctx,
+            event_type="work_item_selected",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={
+                "work_item_id": str(next_item.get("id") or ""),
+                "root_id": str(next_item.get("root_id") or ""),
+            },
+        )
+
+        switched = self._start_new_window(ctx, reason="work_item_completed")
+        if not switched:
+            ctx.snapshot["phase"] = "failed"
+            self._update_status(ctx, "failed")
+            return True
+        return False
+
+    def _handle_work_item_step_failed(self, ctx: _RunContext, *, step_name: str, failure_code: str, evidence: str) -> None:
+        item = self._current_work_item(ctx)
+        if item is None:
+            self._append_event(
+                ctx,
+                event_type="work_item_missing",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={"reason": "step_failed_without_current_item", "step_name": step_name},
+            )
+            ctx.snapshot["phase"] = "failed"
+            self._update_status(ctx, "failed")
+            return
+
+        item_id = str(item.get("id") or "")
+        root_id = str(item.get("root_id") or item_id)
+        item["status"] = "failed"
+        item["notes"] = "\n".join(
+            [
+                f"failure_step: {step_name}",
+                f"failure_code: {failure_code or '-'}",
+                str(evidence or "").strip()[:240],
+            ]
+        ).strip()
+
+        root_item = self._find_work_item(ctx, root_id) or item
+        streak = int(root_item.get("failure_streak") or 0) + 1
+        root_item["failure_streak"] = streak
+        item["failure_streak"] = streak
+
+        self._append_event(
+            ctx,
+            event_type="work_item_failed",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={
+                "work_item_id": item_id,
+                "root_id": root_id,
+                "step_name": step_name,
+                "failure_code": failure_code,
+                "failure_streak": streak,
+            },
+        )
+
+        threshold = max(1, int(ctx.circuit_breaker_threshold))
+        if streak > threshold:
+            root_item["status"] = "blocked"
+            ctx.snapshot["phase"] = "paused"
+            ctx.snapshot["pause_reason"] = "circuit_breaker"
+            ctx.pause_requested = True
+            ctx.pause_reason = "circuit_breaker"
+            self._persist_snapshot(ctx)
+            self._append_event(
+                ctx,
+                event_type="circuit_breaker_tripped",
+                command_text="",
+                model_output_text="",
+                operator_id="",
+                meta={
+                    "root_id": root_id,
+                    "failure_streak": streak,
+                    "last_failure_step": step_name,
+                    "last_failure_code": failure_code,
+                },
+            )
+            return
+
+        fix_id = _new_work_item_id()
+        fix_item = {
+            "id": fix_id,
+            "root_id": root_id,
+            "title": (f"修复：{str(item.get('title') or '').strip()}").strip() or "修复工作项",
+            "acceptance": list(item.get("acceptance") or []),
+            "scope_path": str(item.get("scope_path") or ctx.git_scope_path),
+            "status": "in_progress",
+            "review_required": int(item.get("review_required") or ctx.review_required_default),
+            "review_passed": 0,
+            "failure_streak": streak,
+            "notes": "",
+        }
+        self._get_work_items_ref(ctx).append(fix_item)
+        ctx.snapshot["current_work_item_id"] = fix_id
+        ctx.snapshot["phase"] = "executing_item"
+        self._persist_snapshot(ctx)
+        self._append_event(
+            ctx,
+            event_type="work_item_created",
+            command_text="",
+            model_output_text="",
+            operator_id="",
+            meta={
+                "work_item_id": fix_id,
+                "root_id": root_id,
+                "reason": "fix_after_failure",
+                "based_on": item_id,
+            },
+        )
+        self._refresh_workflow_steps_for_current_window(ctx)
+        self._restart_workflow_in_same_window(ctx)
+
     def _refresh_workflow_steps_for_current_window(self, ctx: _RunContext) -> None:
         ctx.prompt_config = _load_prompt_config(ctx.prompt_config_path)
+        effective_scope, effective_prompt, work_item = self._current_workflow_inputs(ctx)
         stage = f"window_{ctx.snapshot.get('current_window_index', 1)}"
         changed_files = ",".join(
             self._collect_changed_files(
                 workspace_root=ctx.workspace_project_root,
-                scope_path=ctx.git_scope_path,
+                scope_path=effective_scope,
             )[:20]
         )
         template_variables = self._build_template_variables(
@@ -1018,11 +1638,13 @@ class SessionOrchestrator:
         )
         ctx.workflow_steps = _build_workflow_steps(
             task_type=ctx.task_type,
-            task_prompt=ctx.task_prompt,
+            task_prompt=effective_prompt,
             mode=ctx.mode,
-            scope_path=ctx.git_scope_path,
+            scope_path=effective_scope,
             prompt_config=ctx.prompt_config,
             template_variables=template_variables,
+            workflow_mode=ctx.workflow_mode,
+            work_item=work_item,
         )
 
     def _build_handoff(self, ctx: _RunContext) -> Dict[str, Any]:
@@ -1055,12 +1677,47 @@ class SessionOrchestrator:
         step_name: str,
         command_text: str,
     ) -> Optional[RunnerStepResult]:
+        if self._is_work_items_mode(ctx) and step_name == "command_review":
+            return self._run_command_review(ctx)
+
+        if self._is_work_items_mode(ctx) and step_name == "human_review":
+            return self._run_human_review(ctx)
+
         if step_name != "git提交":
             return None
 
+        effective_scope = ctx.git_scope_path
+        if self._is_work_items_mode(ctx):
+            item = self._current_work_item(ctx)
+            if item is None:
+                return RunnerStepResult(
+                    model_output_text="work_items 模式缺少 current_work_item_id，无法执行 git 提交。",
+                    next_command_text=command_text,
+                    done=False,
+                    meta={
+                        "step_status": "failed",
+                        "failure_code": "MISSING_WORK_ITEM",
+                    },
+                )
+            effective_scope = str(item.get("scope_path") or ctx.git_scope_path)
+            review_required = int(item.get("review_required") or ctx.review_required_default)
+            review_passed = int(item.get("review_passed") or 0)
+            if review_passed < review_required:
+                return RunnerStepResult(
+                    model_output_text="未通过 review gate：禁止执行 git 提交。",
+                    next_command_text=command_text,
+                    done=False,
+                    meta={
+                        "step_status": "failed",
+                        "failure_code": "REVIEW_NOT_PASSED",
+                        "review_required": review_required,
+                        "review_passed": review_passed,
+                    },
+                )
+
         has_changes = self._detect_git_changes(
             workspace_root=ctx.workspace_project_root,
-            scope_path=ctx.git_scope_path,
+            scope_path=effective_scope,
         )
         if has_changes is False and ctx.task_type == "dev":
             return RunnerStepResult(
@@ -1085,6 +1742,191 @@ class SessionOrchestrator:
                 },
             )
         return None
+
+    def _collect_changed_files_unscoped(self, *, workspace_root: Path) -> list[str]:
+        cmd = ["git", "status", "--porcelain", "--untracked-files=all"]
+        proc = subprocess.run(  # noqa: S603
+            cmd,
+            cwd=workspace_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+        )
+        if proc.returncode != 0:
+            return []
+
+        ignored_prefixes = self._runtime_ignored_prefixes(workspace_root)
+        files: list[str] = []
+        for changed in self._iter_changed_paths(str(proc.stdout or "")):
+            if any(changed.startswith(prefix) for prefix in ignored_prefixes):
+                continue
+            files.append(changed)
+        return files
+
+    def _run_command_review(self, ctx: _RunContext) -> RunnerStepResult:
+        with ctx.lock:
+            item = self._current_work_item(ctx)
+            if item is None:
+                return RunnerStepResult(
+                    model_output_text="command_review 缺少 current_work_item_id，无法执行。",
+                    next_command_text="",
+                    done=False,
+                    meta={
+                        "step_status": "failed",
+                        "failure_code": "MISSING_WORK_ITEM",
+                    },
+                )
+            work_item_id = str(item.get("id") or "")
+            item_scope = str(item.get("scope_path") or ctx.git_scope_path)
+            run_scope = str(ctx.git_scope_path or "")
+
+        changed_files = self._collect_changed_files_unscoped(workspace_root=ctx.workspace_project_root)
+        out_of_item_scope = [path for path in changed_files if not _path_in_scope(path, item_scope)]
+        out_of_run_scope = [path for path in changed_files if not _path_in_scope(path, run_scope)]
+        ok = (not out_of_item_scope) and (not out_of_run_scope)
+
+        in_scope_count = len(changed_files) - len(out_of_item_scope)
+        summary_lines = [
+            f"command_review 结果：{'通过' if ok else '未通过'}",
+            f"- work_item_id: {work_item_id or '-'}",
+            f"- item_scope: {item_scope or '仓库根目录'}",
+            f"- scope 内变更数: {in_scope_count}",
+        ]
+        if out_of_item_scope:
+            summary_lines.append("- OUT_OF_SCOPE（超出 work_item.scope_path 的变更）：")
+            summary_lines.extend([f"  - {path}" for path in out_of_item_scope[:20]])
+        if out_of_run_scope and run_scope:
+            summary_lines.append("- OUT_OF_RUN_SCOPE（超出 git_scope_path 的变更）：")
+            summary_lines.extend([f"  - {path}" for path in out_of_run_scope[:20]])
+        if not changed_files:
+            summary_lines.append("- 提示：当前未检测到代码变更（后续 git 提交可能失败）。")
+        summary = "\n".join(summary_lines).strip()
+
+        with ctx.lock:
+            item = self._current_work_item(ctx)
+            if item is not None:
+                item["last_command_review"] = {
+                    "ok": ok,
+                    "summary": summary,
+                    "out_of_scope_files": out_of_item_scope[:50],
+                }
+                if ok:
+                    required = int(item.get("review_required") or ctx.review_required_default)
+                    passed = int(item.get("review_passed") or 0)
+                    item["review_passed"] = min(required, max(passed, 1))
+            ctx.snapshot["phase"] = "reviewing_item"
+            self._persist_snapshot(ctx)
+
+        return RunnerStepResult(
+            model_output_text=summary,
+            next_command_text="",
+            done=False,
+            meta={
+                "step_status": "passed" if ok else "failed",
+                "failure_code": "OUT_OF_SCOPE" if out_of_item_scope else ("OUT_OF_RUN_SCOPE" if out_of_run_scope else ""),
+            },
+        )
+
+    def _run_human_review(self, ctx: _RunContext) -> RunnerStepResult:
+        while True:
+            with ctx.lock:
+                item = self._current_work_item(ctx)
+                if item is None:
+                    return RunnerStepResult(
+                        model_output_text="human_review 缺少 current_work_item_id，无法执行。",
+                        next_command_text="",
+                        done=False,
+                        meta={
+                            "step_status": "failed",
+                            "failure_code": "MISSING_WORK_ITEM",
+                        },
+                    )
+
+                work_item_id = str(item.get("id") or "")
+                raw_decision = ctx.snapshot.get("human_review_decision")
+                decision = raw_decision if isinstance(raw_decision, dict) else {}
+                decision_work_item_id = str(decision.get("work_item_id") or "")
+                decision_value = str(decision.get("decision") or "")
+                note = str(decision.get("note") or "")
+                decided_at = str(decision.get("at") or "") or _utc_now()
+
+                if decision_work_item_id == work_item_id and decision_value in {"approve", "reject"}:
+                    item["last_human_review"] = {
+                        "decision": decision_value,
+                        "note": note,
+                        "at": decided_at,
+                    }
+                    ctx.snapshot["human_review_decision"] = {}
+                    ctx.snapshot["pause_reason"] = ""
+                    ctx.pause_reason = ""
+                    ctx.snapshot["phase"] = "reviewing_item"
+                    self._update_status(ctx, "running")
+                    self._append_event(
+                        ctx,
+                        event_type="human_review_applied",
+                        command_text="",
+                        model_output_text="",
+                        operator_id="",
+                        meta={
+                            "work_item_id": work_item_id,
+                            "decision": decision_value,
+                        },
+                    )
+
+                    if decision_value == "approve":
+                        required = int(item.get("review_required") or ctx.review_required_default)
+                        item["review_passed"] = max(int(item.get("review_passed") or 0), required)
+                        self._persist_snapshot(ctx)
+                        return RunnerStepResult(
+                            model_output_text="人工评审通过。",
+                            next_command_text="",
+                            done=False,
+                            meta={"step_status": "passed"},
+                        )
+
+                    self._persist_snapshot(ctx)
+                    return RunnerStepResult(
+                        model_output_text=("人工评审未通过：" + note).strip(),
+                        next_command_text="",
+                        done=False,
+                        meta={
+                            "step_status": "failed",
+                            "failure_code": "HUMAN_REVIEW_REJECTED",
+                        },
+                    )
+
+                if ctx.snapshot.get("status") != "paused" or ctx.snapshot.get("pause_reason") != "human_review":
+                    ctx.snapshot["pause_reason"] = "human_review"
+                    ctx.pause_reason = "human_review"
+                    ctx.snapshot["phase"] = "paused"
+                    self._update_status(ctx, "paused")
+                    ctx.resume_event.clear()
+                    self._append_event(
+                        ctx,
+                        event_type="human_review_requested",
+                        command_text="",
+                        model_output_text="",
+                        operator_id="",
+                        meta={
+                            "work_item_id": work_item_id,
+                        },
+                    )
+
+            if ctx.stop_requested:
+                return RunnerStepResult(
+                    model_output_text="运行已停止，human_review 未完成。",
+                    next_command_text="",
+                    done=False,
+                    meta={
+                        "step_status": "failed",
+                        "failure_code": "STOP_REQUESTED",
+                    },
+                )
+
+            ctx.resume_event.wait(timeout=0.5)
+            ctx.resume_event.clear()
 
     def _resolve_step_result(self, *, step_name: str, result: RunnerStepResult) -> tuple[str, Dict[str, Any]]:
         output_text = str(result.model_output_text or "")

@@ -20,6 +20,7 @@
         <p id="run-id-line" class="run-id-line">run_id: -</p>
         <ul class="status-list">
           <li><span>状态</span><strong id="status">idle</strong></li>
+          <li><span>阶段</span><strong id="phase">-</strong></li>
           <li><span>窗口</span><strong id="window">-</strong></li>
           <li><span>轮次</span><strong id="round">-</strong></li>
           <li><span>步骤</span><strong id="step">-</strong></li>
@@ -44,12 +45,43 @@
           <option value="real">real</option>
         </select>
 
+        <label for="workflow-mode">编排模式</label>
+        <select id="workflow-mode">
+          <option value="work_items">work_items</option>
+          <option value="classic">classic</option>
+        </select>
+
         <label for="operator-id">操作人 ID</label>
         <input id="operator-id" value="human">
 
         <div class="actions">
           <button id="restart-btn" type="button">新建会话</button>
           <button id="report-btn" type="button" class="ghost">导出报告</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="WorkItem 面板">
+        <h2>WorkItem</h2>
+        <pre id="workitem-current-box" class="review-box"></pre>
+        <ul id="workitem-list" class="workitem-list"></ul>
+      </section>
+
+      <section class="panel" aria-label="Review Gate 面板">
+        <h2>Review Gate</h2>
+        <p id="review-status" class="review-status"></p>
+        <pre id="command-review-box" class="review-box"></pre>
+
+        <label for="human-review-note">人工评审备注</label>
+        <textarea id="human-review-note" rows="2" placeholder="可选：说明通过/打回理由"></textarea>
+
+        <div class="actions">
+          <button id="approve-btn" type="button">通过</button>
+          <button id="reject-btn" type="button" class="ghost">打回</button>
+        </div>
+
+        <div class="actions">
+          <button id="pause-btn" type="button" class="ghost">暂停</button>
+          <button id="resume-btn" type="button" class="ghost">继续</button>
         </div>
       </section>
 

@@ -93,6 +93,11 @@ class SessionOrchestratorHttpServer:
                             },
                         )
 
+                    if path.startswith("/api/runs/") and path.endswith("/work-items"):
+                        run_id = path[len("/api/runs/") : -len("/work-items")].strip("/")
+                        payload = orchestrator.get_work_items(run_id)
+                        return self._json(200, payload)
+
                     if path.startswith("/api/runs/"):
                         run_id = path[len("/api/runs/") :].strip("/")
                         snapshot = orchestrator.get_snapshot(run_id)
@@ -123,6 +128,7 @@ class SessionOrchestratorHttpServer:
                             task_id=str(body.get("task_id") or "session-task"),
                             task_prompt=str(body.get("task_prompt") or ""),
                             task_type=str(body.get("task_type") or "dev"),
+                            workflow_mode=str(body.get("workflow_mode") or "classic"),
                             mode=str(body.get("mode") or "mock"),
                             model_id=str(body.get("model_id") or "gpt-5.3-codex"),
                             reasoning_level=str(body.get("reasoning_level") or "medium"),
@@ -137,6 +143,41 @@ class SessionOrchestratorHttpServer:
                             prompt_config_path=body.get("prompt_config_path"),
                         )
                         return self._json(200, {"run_id": run_id})
+
+                    if path.startswith("/api/runs/") and path.endswith("/human-review"):
+                        run_id = path[len("/api/runs/") : -len("/human-review")].strip("/")
+                        body = _read_json_body(self)
+                        orchestrator.submit_human_review(
+                            run_id,
+                            work_item_id=str(body.get("work_item_id") or ""),
+                            decision=str(body.get("decision") or ""),
+                            note=str(body.get("note") or ""),
+                        )
+                        return self._json(200, {"ok": True})
+
+                    if path.startswith("/api/runs/") and path.endswith("/replan"):
+                        run_id = path[len("/api/runs/") : -len("/replan")].strip("/")
+                        body = _read_json_body(self)
+                        orchestrator.replan(
+                            run_id,
+                            instruction=str(body.get("instruction") or ""),
+                        )
+                        return self._json(200, {"ok": True})
+
+                    if path.startswith("/api/runs/") and path.endswith("/pause"):
+                        run_id = path[len("/api/runs/") : -len("/pause")].strip("/")
+                        body = _read_json_body(self)
+                        orchestrator.pause_run(
+                            run_id,
+                            reason=str(body.get("reason") or "human_request"),
+                            note=str(body.get("note") or ""),
+                        )
+                        return self._json(200, {"ok": True})
+
+                    if path.startswith("/api/runs/") and path.endswith("/resume"):
+                        run_id = path[len("/api/runs/") : -len("/resume")].strip("/")
+                        orchestrator.resume_run(run_id)
+                        return self._json(200, {"ok": True})
 
                     if path.startswith("/api/runs/") and path.endswith("/operator-message"):
                         run_id = path[len("/api/runs/") : -len("/operator-message")].strip("/")
